@@ -14,7 +14,7 @@ const RULE_COOLDOWN_SECS: i64 = 600;
 /// Abstand für erneute Versuche, nachdem das Gerät einen Wert abgelehnt hat.
 const RULE_RETRY_AFTER_REJECT_SECS: i64 = 3600;
 /// Reihenfolge, in der der Ladestand eines einzelnen Geräts gesucht wird.
-const SOC_KEYS: [&str; 4] = ["bmsBattSoc", "soc", "f32ShowSoc", "cmsBattSoc"];
+const SOC_KEYS: [&str; 3] = ["bmsBattSoc", "soc", "f32ShowSoc"];
 const ROLE_KEYS: [&str; 2] = ["distributedDeviceStatus", "seriesConnectDeviceStatus"];
 
 pub fn client(state: &AppState) -> Result<EcoFlowClient> {
@@ -50,41 +50,63 @@ pub fn pick_soc(quotas: &Map<String, Value>, override_key: &str) -> Option<f64> 
     if !override_key.is_empty() {
         return quotas.get(override_key).and_then(as_f64);
     }
-    SOC_KEYS
-        .iter()
-        .filter_map(|k| quotas.get(*k).and_then(as_f64))
-        .find(|v| *v > 0.0)
-        .or_else(|| SOC_KEYS.iter().find_map(|k| quotas.get(*k).and_then(as_f64)))
+    let unit: Vec<f64> = SOC_KEYS.iter().filter_map(|k| quotas.get(*k).and_then(as_f64)).collect();
+    if let Some(v) = unit.iter().copied().find(|v| *v > 0.0).or_else(|| unit.first().copied()) {
+        return Some(v);
+    }
+    // Systemladestand: nur das Hauptgerät meldet hier einen Wert über 0.
+    quotas.get("cmsBattSoc").and_then(as_f64).filter(|v| *v > 0.0)
 }
 
-fn pick_role(quotas: &Map<String, Value>) -> String {
-    ROLE_KEYS
-        .iter()
-        .find_map(|k| quotas.get(*k).and_then(|v| v.as_str()).map(String::from))
-        .unwrap_or_default()
+/// Haupt- oder Nebengerät? Aus MQTT kommt `distributedDeviceStatus`; ohne MQTT
+/// gilt: Nur das Hauptgerät meldet einen Systemladestand (`cmsBattSoc`) über 0.
+pub fn pick_role(quotas: &Map<String, Value>) -> String {
+    if let Some(r) = ROLE_KEYS.iter().find_map(|k| quotas.get(*k).and_then(|v| v.as_str()).filter(|s| !s.is_empty())) {
+        return r.to_string();
+    }
+    match quotas.get("cmsBattSoc").and_then(as_f64) {
+        Some(v) if v > 0.0 => "MASTER".into(),
+        Some(_) => "SLAVE".into(),
+        None => String::new(),
+    }
+}
+
+/// Neue Werte (HTTP oder MQTT) speichern und Ladestand/Rolle neu bestimmen.
+pub fn apply_quotas(
+    conn: &rusqlite::Connection,
+    sn: &str,
+    new: &Map<String, Value>,
+) -> Result<(Map<String, Value>, Option<f64>)> {
+    let merged = db::merge_quotas(conn, sn, new)?;
+    let soc_key = db::device_soc_key(conn, sn)?;
+    let soc = pick_soc(&merged, &soc_key);
+    let role = pick_role(&merged);
+    conn.execute(
+        "UPDATE devices SET soc=?2, role=?3, online=1 WHERE sn=?1",
+        rusqlite::params![sn, soc, role],
+    )?;
+    Ok((merged, soc))
 }
 
 /// Ein Gerät abfragen, Werte speichern und dessen Regeln auswerten.
 pub async fn poll_device(state: &Arc<AppState>, client: &EcoFlowClient, sn: &str) -> Result<()> {
     let now = chrono::Utc::now().timestamp();
     match client.quota_all(sn).await {
-        Ok(quotas) => {
-            {
+        Ok(http_quotas) => {
+            let quotas = {
                 let conn = state.db.lock().unwrap();
-                let soc_key = db::device_soc_key(&conn, sn)?;
-                let soc = pick_soc(&quotas, &soc_key);
-                let role = pick_role(&quotas);
-                let num = |k: &str| quotas.get(k).and_then(as_f64);
                 let prev_err: Option<String> = conn
                     .query_row("SELECT last_error FROM devices WHERE sn = ?1", [sn], |r| r.get(0))
                     .unwrap_or(None);
                 if prev_err.is_some() {
                     db::log_event(&conn, sn, "info", "Gerät antwortet wieder");
                 }
+                let (quotas, soc) = apply_quotas(&conn, sn, &http_quotas)?;
                 conn.execute(
-                    "UPDATE devices SET quotas=?2, soc=?3, role=?4, last_poll=?5, last_error=NULL, online=1 WHERE sn=?1",
-                    rusqlite::params![sn, serde_json::to_string(&quotas)?, soc, role, now],
+                    "UPDATE devices SET last_poll=?2, last_error=NULL WHERE sn=?1",
+                    rusqlite::params![sn, now],
                 )?;
+                let num = |k: &str| quotas.get(k).and_then(as_f64);
                 conn.execute(
                     "INSERT INTO samples (sn, ts, soc, battery_w, min_dsg, max_chg, backup) VALUES (?1,?2,?3,?4,?5,?6,?7)",
                     rusqlite::params![
@@ -97,7 +119,8 @@ pub async fn poll_device(state: &Arc<AppState>, client: &EcoFlowClient, sn: &str
                         num("backupReverseSoc")
                     ],
                 )?;
-            }
+                quotas
+            };
             evaluate_rules(state, client, sn, &quotas).await;
             Ok(())
         }
@@ -394,5 +417,12 @@ mod tests {
         let q: Map<String, Value> = serde_json::from_value(json!({"cmsBattSoc": 0.0, "soc": 47, "bmsBattSoc": 0})).unwrap();
         assert_eq!(pick_soc(&q, ""), Some(47.0));
         assert_eq!(pick_soc(&q, "cmsBattSoc"), Some(0.0));
+        // Nur HTTP-Daten: Nebengerät hat keinen Ladestand, Hauptgerät den Systemwert
+        let neben: Map<String, Value> = serde_json::from_value(json!({"cmsBattSoc": 0.0})).unwrap();
+        assert_eq!(pick_soc(&neben, ""), None);
+        assert_eq!(pick_role(&neben), "SLAVE");
+        let haupt: Map<String, Value> = serde_json::from_value(json!({"cmsBattSoc": 78.0})).unwrap();
+        assert_eq!(pick_soc(&haupt, ""), Some(78.0));
+        assert_eq!(pick_role(&haupt), "MASTER");
     }
 }

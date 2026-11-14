@@ -9,7 +9,8 @@ Ziel: **jedem Speicher eigene Regeln geben**, z. B. eigene Entladegrenzen pro Ge
 ## Funktionen
 
 - **Geräteverwaltung:** Alle Geräte des EcoFlow-Kontos abrufen, Anzeigenamen vergeben, Abfrage pro Gerät an- und ausschalten, Haupt- und Nebengerät erkennen
-- **Übersicht:** Ladestand, Batterieleistung, Entlade- und Ladegrenze sowie Backup-Reserve jedes Speichers
+- **Übersicht:** Systemwerte (Gesamtladestand, Solar, Netz, Hausverbrauch, Grenzen) und pro Speicher Ladestand, AC-Leistung und AC-Ausgänge
+- **Live-Daten über MQTT:** Die HTTP-Schnittstelle von EcoFlow liefert bei STREAM nur wenige Systemwerte. Der Ladestand der einzelnen Speicher und die Rolle (Haupt/Neben) kommen über den MQTT-Broker der Open-API. ecoflower-home verbindet sich automatisch damit.
 - **Verlauf:** Ladestand und gemeldete Entladegrenze der letzten 24 Stunden als Diagramm (in SQLite gespeichert, Aufbewahrung einstellbar)
 - **Alle Messwerte (Quotas)** eines Geräts durchsuchbar, z. B. um herauszufinden, welche Werte ein Gerät liefert
 - **Befehle senden:** über Vorlagen (Entladegrenze, Ladegrenze, Backup-Reserve, AC-Ausgänge) oder als Roh-JSON
@@ -89,7 +90,9 @@ cargo build --release
 | `TZ`            | Systemzeit            | Zeitzone für die Zeitfenster der Regeln           |
 | `RUST_LOG`      | `info`                | Protokollstufe (`debug` für mehr Details)         |
 
-Alles Weitere stellen Sie in der Weboberfläche unter **Einstellungen** ein: API-Zugangsdaten, API-Region (Europa: `api-e.ecoflow.com`), Abfrage-Intervall, Aufbewahrungsdauer und Testmodus.
+Alles Weitere stellen Sie in der Weboberfläche unter **Einstellungen** ein: API-Zugangsdaten, API-Region (Europa: `api-e.ecoflow.com`), Abfrage-Intervall, Aufbewahrungsdauer, MQTT-Live-Daten und Testmodus.
+
+Für MQTT braucht der Server eine ausgehende Verbindung zum EcoFlow-Broker (Port 8883, TLS). Die Zugangsdaten dafür holt das Programm selbst über die API. Ob die Verbindung steht, zeigt oben rechts das Abzeichen „MQTT verbunden“.
 
 ## Erste Schritte
 
@@ -99,6 +102,16 @@ Alles Weitere stellen Sie in der Weboberfläche unter **Einstellungen** ein: API
 4. **Test, ob ein Nebengerät eigene Grenzen annimmt:** Beim Nebengerät unter „Befehl senden“ den Befehl „STREAM Entladegrenze“ mit z. B. `30` senden, etwa 30 Sekunden warten und dann auf „Jetzt abfragen“ klicken. Prüfen, ob `cmsMinDsgSoc` beim Nebengerät 30 zeigt und ob sich die Werte beim Hauptgerät mitverändert haben.
 5. Je nach Ergebnis unter **Regeln** eine „Wert halten“- oder eine „Schwellwert“-Regel anlegen.
 6. Erst wenn alles passt, unter **Einstellungen** den **Testmodus ausschalten**.
+
+## Was die EcoFlow-API bei STREAM liefert
+
+Erkenntnisse aus dem Betrieb mit Ultra X (Hauptgerät), Ultra und zwei AC Pro:
+
+- **HTTP** (`quota/all`) liefert pro Gerät nur 15 Werte. Fast alle davon sind **Systemwerte**, die nur das Hauptgerät sinnvoll meldet (`cmsBattSoc`, `powGetPvSum`, `powGetSysGrid`, `powGetSysLoad`, `powGetBpCms`). Nebengeräte melden dort 0. **Pro Gerät** sind nur `gridConnectionPower` sowie die AC-Ausgänge `relay2Onoff`/`relay3Onoff` dabei.
+- **Haupt- oder Nebengerät:** ohne MQTT daran erkannt, dass nur das Hauptgerät einen `cmsBattSoc` über 0 meldet
+- **Ladestand pro Speicher** (`bmsBattSoc`/`soc`) kommt nur über **MQTT**
+- **Backup-Reserve** gilt immer für das ganze System. Wird sie an einem Gerät gesetzt, übernehmen alle Geräte den Wert.
+- Lade- und Entladegrenze melden alle Geräte gleich. Ob ein Nebengerät eine eigene Grenze annimmt, zeigt die Regel „Wert halten“ (Status „übernommen“ oder „nicht übernommen“).
 
 ## Befehlsvorlagen
 
@@ -120,7 +133,7 @@ Die Backup-Reserve muss laut Gerät mindestens 3 % über der Entladegrenze liege
 
 ## Technik
 
-- Rust (axum, tokio, reqwest mit rustls, rusqlite mit gebündeltem SQLite)
+- Rust (axum, tokio, reqwest mit rustls, rumqttc für MQTT, rusqlite mit gebündeltem SQLite)
 - Weboberfläche: reines HTML/CSS/JavaScript, in die Programmdatei eingebettet, kein Build-Schritt nötig
 - Die gesamte Anwendung ist eine einzige Datei; alle Daten liegen in einer SQLite-Datei
 - API-Signatur: HMAC-SHA256 nach EcoFlow-Dokumentation

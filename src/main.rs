@@ -3,6 +3,7 @@
 mod db;
 mod ecoflow;
 mod engine;
+mod mqtt;
 mod web;
 
 use std::sync::{Arc, Mutex};
@@ -11,6 +12,8 @@ use tokio::sync::Notify;
 pub struct AppState {
     pub db: Mutex<rusqlite::Connection>,
     pub poll_now: Notify,
+    pub mqtt: Mutex<mqtt::MqttStatus>,
+    pub mqtt_restart: Notify,
     pub web_user: String,
     pub web_password: Option<String>,
 }
@@ -29,13 +32,21 @@ async fn main() -> anyhow::Result<()> {
     let web_password = std::env::var("WEB_PASSWORD").ok().filter(|p| !p.is_empty());
 
     let conn = db::open(&db_path)?;
-    let state = Arc::new(AppState { db: Mutex::new(conn), poll_now: Notify::new(), web_user, web_password });
+    let state = Arc::new(AppState {
+        db: Mutex::new(conn),
+        poll_now: Notify::new(),
+        mqtt: Mutex::new(mqtt::MqttStatus::default()),
+        mqtt_restart: Notify::new(),
+        web_user,
+        web_password,
+    });
 
     if state.web_password.is_none() {
         tracing::warn!("WEB_PASSWORD ist nicht gesetzt – die Weboberfläche ist ohne Passwort erreichbar");
     }
 
     tokio::spawn(engine::run_poller(state.clone()));
+    tokio::spawn(mqtt::run(state.clone()));
 
     let app = web::router(state);
     let listener = tokio::net::TcpListener::bind(&bind).await?;

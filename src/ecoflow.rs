@@ -32,6 +32,60 @@ pub struct ApiDevice {
     pub online: Option<i64>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct MqttCertification {
+    #[serde(rename = "certificateAccount")]
+    pub account: String,
+    #[serde(rename = "certificatePassword")]
+    pub password: String,
+    pub url: String,
+    #[serde(deserialize_with = "port_from_any")]
+    pub port: u16,
+    #[serde(default)]
+    pub protocol: String,
+}
+
+fn port_from_any<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<u16, D::Error> {
+    let v = Value::deserialize(d)?;
+    match &v {
+        Value::Number(n) => n.as_u64().map(|p| p as u16),
+        Value::String(s) => s.parse().ok(),
+        _ => None,
+    }
+    .ok_or_else(|| serde::de::Error::custom(format!("ungültiger Port: {v}")))
+}
+
+/// Eine MQTT-Nachricht der Open-API in flache Quota-Schlüssel umwandeln.
+/// Die eigentlichen Werte stehen in `params` oder `param`; verschachtelte Objekte
+/// werden wie bei der HTTP-API mit Punkt verbunden (`a.b`).
+pub fn flatten_mqtt_message(msg: &Value) -> Map<String, Value> {
+    let mut out = Map::new();
+    let source = msg
+        .get("params")
+        .or_else(|| msg.get("param"))
+        .filter(|v| v.is_object())
+        .unwrap_or(msg);
+    if let Value::Object(map) = source {
+        for (k, v) in map {
+            flatten_value_into(k, v, &mut out);
+        }
+    }
+    out
+}
+
+fn flatten_value_into(prefix: &str, value: &Value, out: &mut Map<String, Value>) {
+    match value {
+        Value::Object(map) if !map.is_empty() => {
+            for (k, v) in map {
+                flatten_value_into(&format!("{prefix}.{k}"), v, out);
+            }
+        }
+        other => {
+            out.insert(prefix.to_string(), other.clone());
+        }
+    }
+}
+
 impl EcoFlowClient {
     pub fn new(base_url: &str, access_key: &str, secret_key: &str) -> Result<Self> {
         let http = reqwest::Client::builder()
@@ -109,6 +163,13 @@ impl EcoFlowClient {
         let devices: Vec<ApiDevice> =
             serde_json::from_value(list).map_err(|e| anyhow!("Geräteliste nicht lesbar: {e}"))?;
         Ok(devices)
+    }
+
+    /// Zugangsdaten für den MQTT-Broker der Open-API.
+    pub async fn mqtt_certification(&self) -> Result<MqttCertification> {
+        let json = self.send(reqwest::Method::GET, "/iot-open/sign/certification", None).await?;
+        Self::check_code(&json)?;
+        serde_json::from_value(json["data"].clone()).map_err(|e| anyhow!("MQTT-Zugangsdaten nicht lesbar: {e}"))
     }
 
     /// Alle Messwerte („Quotas“) eines Geräts.
@@ -214,6 +275,17 @@ mod tests {
         let mut mac = Hmac::<Sha256>::new_from_slice(b"secret").unwrap();
         mac.update(b"accessKey=&nonce=123456&timestamp=1671171709428");
         assert_eq!(s, hex::encode(mac.finalize().into_bytes()));
+    }
+
+    #[test]
+    fn mqtt_nachricht_wird_flach() {
+        let m = json!({"id": 1, "version": "1.0", "params": {"bmsBattSoc": 47, "energyStrategyOperateMode": {"operateSelfPoweredOpen": true}}});
+        let f = flatten_mqtt_message(&m);
+        assert_eq!(f["bmsBattSoc"], json!(47));
+        assert_eq!(f["energyStrategyOperateMode.operateSelfPoweredOpen"], json!(true));
+        assert!(!f.contains_key("id"));
+        let ohne = json!({"soc": 12});
+        assert_eq!(flatten_mqtt_message(&ohne)["soc"], json!(12));
     }
 
     #[test]

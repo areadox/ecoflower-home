@@ -41,9 +41,13 @@ async function guarded(fn) {
 async function loadBase() {
   [cache.status, cache.devices, cache.commands] = await Promise.all([api("/status"), api("/devices"), api("/commands")]);
   document.getElementById("version").textContent = "v" + cache.status.version;
-  document.getElementById("mode-badge").innerHTML = cache.status.dry_run
+  const m = cache.status.mqtt || {};
+  const mqttBadge = m.connected
+    ? `<span class="badge ok" title="Live-Daten pro Gerät, ${m.messages} Nachrichten">MQTT verbunden</span>`
+    : `<span class="badge err" title="${esc(m.error || "")}">MQTT getrennt</span>`;
+  document.getElementById("mode-badge").innerHTML = mqttBadge + " " + (cache.status.dry_run
     ? '<span class="badge warn" title="Regeln senden keine Befehle, sie protokollieren nur">Testmodus</span>'
-    : '<span class="badge ok">Regeln aktiv</span>';
+    : '<span class="badge ok">Regeln aktiv</span>');
 }
 
 // ---------- Routing ----------
@@ -83,7 +87,8 @@ async function renderOverview() {
   if (!devs.length) {
     html += `<p class="muted">Noch keine Geräte. Klicken Sie auf „Geräte von EcoFlow abrufen“.</p>`;
   }
-  html += `<div class="grid">` + devs.map(deviceCard).join("") + `</div>`;
+  html += `<div id="system">${systemCard(devs)}</div>`;
+  html += `<h2>Speicher</h2><div class="grid">` + devs.map(deviceCard).join("") + `</div>`;
   $app.innerHTML = html;
   document.getElementById("sync").onclick = () => guarded(async () => {
     const r = await api("/devices/sync", { method: "POST" });
@@ -94,8 +99,35 @@ async function renderOverview() {
     cache.devices = await api("/devices");
     const grid = $app.querySelector(".grid");
     if (grid) grid.innerHTML = cache.devices.map(deviceCard).join("");
+    const sys = document.getElementById("system");
+    if (sys) sys.innerHTML = systemCard(cache.devices);
   }), 15000);
 }
+
+function systemCard(devs) {
+  const m = devs.find(d => d.role === "MASTER") || devs.find(d => (d.sys_soc ?? 0) > 0);
+  if (!m) return "";
+  const soc = m.sys_soc ?? 0;
+  return `<div class="card system">
+    <h3><span>System</span><span class="muted">Werte vom Hauptgerät ${esc(devName(m))}</span></h3>
+    <div class="row" style="align-items:center">
+      <div><div class="soc">${fmtNum(m.sys_soc, " %")}</div>
+        <div class="bar"><div style="width:${soc}%"></div>${m.min_dsg != null ? `<div class="mark" style="left:${m.min_dsg}%"></div>` : ""}</div></div>
+      <dl class="kv">
+        <dt>Solar</dt><dd>${fmtNum(m.pv_w, " W")}</dd>
+        <dt>Netz</dt><dd>${fmtNum(m.grid_w, " W")}</dd>
+        <dt>Hausverbrauch</dt><dd>${fmtNum(m.load_w, " W")}</dd>
+        <dt>Batterien gesamt</dt><dd>${fmtNum(m.battery_w, " W")}</dd>
+      </dl>
+      <dl class="kv">
+        <dt>Entladegrenze</dt><dd>${fmtNum(m.min_dsg, " %")}</dd>
+        <dt>Ladegrenze</dt><dd>${fmtNum(m.max_chg, " %")}</dd>
+        <dt>Backup-Reserve</dt><dd>${fmtNum(m.backup, " %")}</dd>
+      </dl>
+    </div></div>`;
+}
+
+const onOff = v => (v === null || v === undefined ? "–" : v ? "an" : "aus");
 
 function deviceCard(d) {
   const soc = d.soc ?? 0;
@@ -103,17 +135,16 @@ function deviceCard(d) {
   const state = !d.enabled ? '<span class="badge">pausiert</span>'
     : d.last_error ? '<span class="badge err" title="' + esc(d.last_error) + '">Fehler</span>'
     : '<span class="badge ok">ok</span>';
-  const mark = d.min_dsg != null ? `<div class="mark" style="left:${d.min_dsg}%"></div>` : "";
+  const socHint = d.soc == null ? `<div class="muted">Ladestand kommt nur über MQTT</div>` : "";
   return `<div class="card"><a href="#/device/${encodeURIComponent(d.sn)}">
     <h3><span>${esc(devName(d))}</span><span>${role} ${state}</span></h3>
     <div class="muted">${esc(d.product)} · ${esc(d.sn)}</div>
     <div class="soc">${fmtNum(d.soc, " %")}</div>
-    <div class="bar"><div style="width:${soc}%"></div>${mark}</div>
+    <div class="bar"><div style="width:${soc}%"></div></div>${socHint}
     <dl class="kv">
-      <dt>Batterieleistung</dt><dd>${fmtNum(d.battery_w, " W")}</dd>
-      <dt>Entladegrenze</dt><dd>${fmtNum(d.min_dsg, " %")}</dd>
-      <dt>Ladegrenze</dt><dd>${fmtNum(d.max_chg, " %")}</dd>
-      <dt>Backup-Reserve</dt><dd>${fmtNum(d.backup, " %")}</dd>
+      <dt>AC-Leistung (Gerät)</dt><dd>${fmtNum(d.ac_w, " W")}</dd>
+      <dt>AC-Ausgang 1 / 2</dt><dd>${onOff(d.ac1_on)} / ${onOff(d.ac2_on)}</dd>
+      <dt>Live-Daten (MQTT)</dt><dd>${fmtTime(d.mqtt_ts)}</dd>
       <dt>Letzte Abfrage</dt><dd>${fmtTime(d.last_poll)}</dd>
     </dl></a></div>`;
 }
@@ -396,7 +427,9 @@ async function renderSettings() {
         <div><label>Abfrage-Intervall (Sekunden, min. 10)</label><input id="s-poll" type="number" value="${s.poll_seconds}"></div>
         <div><label>Verlauf aufbewahren (Tage)</label><input id="s-ret" type="number" value="${s.retention_days}"></div>
       </div>
-      <label class="checkbox" style="margin-top:14px"><input type="checkbox" id="s-dry" ${s.dry_run ? "checked" : ""}>
+      <label class="checkbox" style="margin-top:14px"><input type="checkbox" id="s-mqtt" ${s.mqtt_enabled ? "checked" : ""}>
+        Live-Daten über MQTT empfangen (nötig für den Ladestand der einzelnen Speicher)</label>
+      <label class="checkbox" style="margin-top:8px"><input type="checkbox" id="s-dry" ${s.dry_run ? "checked" : ""}>
         Testmodus – Regeln protokollieren nur und senden keine Befehle</label>
       <div class="row" style="margin-top:16px"><button id="s-save">Speichern</button></div>
     </div>`;
@@ -408,6 +441,7 @@ async function renderSettings() {
       poll_seconds: Number(document.getElementById("s-poll").value),
       retention_days: Number(document.getElementById("s-ret").value),
       dry_run: document.getElementById("s-dry").checked,
+      mqtt_enabled: document.getElementById("s-mqtt").checked,
     }});
     toast("Gespeichert");
     route();

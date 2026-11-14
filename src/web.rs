@@ -106,6 +106,7 @@ async fn status(State(s): State<Arc<AppState>>) -> AppResult<Json<Value>> {
         "configured": !st.access_key.is_empty() && !st.secret_key.is_empty(),
         "dry_run": st.dry_run,
         "poll_seconds": st.poll_seconds,
+        "mqtt": *s.mqtt.lock().unwrap(),
     })))
 }
 
@@ -119,6 +120,7 @@ async fn get_settings(State(s): State<Arc<AppState>>) -> AppResult<Json<Value>> 
         "poll_seconds": st.poll_seconds,
         "dry_run": st.dry_run,
         "retention_days": st.retention_days,
+        "mqtt_enabled": st.mqtt_enabled,
     })))
 }
 
@@ -130,6 +132,7 @@ struct SettingsInput {
     poll_seconds: Option<u64>,
     dry_run: Option<bool>,
     retention_days: Option<u64>,
+    mqtt_enabled: Option<bool>,
 }
 
 async fn save_settings(State(s): State<Arc<AppState>>, Json(i): Json<SettingsInput>) -> AppResult<Json<Value>> {
@@ -154,8 +157,12 @@ async fn save_settings(State(s): State<Arc<AppState>>, Json(i): Json<SettingsInp
         if let Some(v) = i.retention_days {
             db::set_setting(&conn, "retention_days", &v.max(1).to_string())?;
         }
+        if let Some(v) = i.mqtt_enabled {
+            db::set_setting(&conn, "mqtt_enabled", if v { "1" } else { "0" })?;
+        }
     }
     s.poll_now.notify_one();
+    s.mqtt_restart.notify_one();
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -182,6 +189,7 @@ async fn sync_devices(State(s): State<Arc<AppState>>) -> AppResult<Json<Value>> 
         }
     }
     s.poll_now.notify_one();
+    s.mqtt_restart.notify_one();
     Ok(Json(json!({ "found": list.len(), "added": added })))
 }
 

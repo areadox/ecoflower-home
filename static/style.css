@@ -63,3 +63,5 @@ tr.level-warn td { color: var(--warn); }
 pre { background: var(--bg); border: 1px solid var(--line); padding: 10px; border-radius: 6px; overflow: auto; font-size: 12px; max-height: 300px; }
 .checkbox { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 14px; }
 .checkbox input { width: auto; }
+.card.system { margin-bottom: 8px; }
+.card.system .kv { margin-top: 0; }

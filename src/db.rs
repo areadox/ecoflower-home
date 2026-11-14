@@ -147,6 +147,7 @@ pub struct Settings {
     pub poll_seconds: u64,
     pub dry_run: bool,
     pub retention_days: u64,
+    pub mqtt_enabled: bool,
 }
 
 pub fn load_settings(conn: &Connection) -> Result<Settings> {
@@ -161,6 +162,7 @@ pub fn load_settings(conn: &Connection) -> Result<Settings> {
         poll_seconds: get("poll_seconds")?.parse().unwrap_or(60).max(10),
         dry_run: get("dry_run")? != "0",
         retention_days: get("retention_days")?.parse().unwrap_or(30).max(1),
+        mqtt_enabled: get("mqtt_enabled")? != "0",
     })
 }
 
@@ -222,6 +224,14 @@ pub struct Device {
     pub max_chg: Option<f64>,
     pub backup: Option<f64>,
     pub battery_w: Option<f64>,
+    pub ac_w: Option<f64>,
+    pub ac1_on: Option<bool>,
+    pub ac2_on: Option<bool>,
+    pub sys_soc: Option<f64>,
+    pub pv_w: Option<f64>,
+    pub grid_w: Option<f64>,
+    pub load_w: Option<f64>,
+    pub mqtt_ts: Option<i64>,
 }
 
 pub fn list_devices(conn: &Connection) -> Result<Vec<Device>> {
@@ -250,6 +260,14 @@ pub fn list_devices(conn: &Connection) -> Result<Vec<Device>> {
                 max_chg: num("cmsMaxChgSoc"),
                 backup: num("backupReverseSoc"),
                 battery_w: num("powGetBpCms"),
+                ac_w: num("gridConnectionPower"),
+                ac1_on: num("relay2Onoff").map(|v| v != 0.0),
+                ac2_on: num("relay3Onoff").map(|v| v != 0.0),
+                sys_soc: num("cmsBattSoc"),
+                pv_w: num("powGetPvSum"),
+                grid_w: num("powGetSysGrid"),
+                load_w: num("powGetSysLoad"),
+                mqtt_ts: num("quota_mqtt_ts").map(|v| v as i64),
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -274,6 +292,23 @@ pub fn get_quotas(conn: &Connection, sn: &str) -> Result<Option<Value>> {
         .query_row("SELECT quotas FROM devices WHERE sn = ?1", [sn], |r| r.get(0))
         .optional()?;
     Ok(s.flatten().and_then(|s| serde_json::from_str(&s).ok()))
+}
+
+/// Neue Werte in die gespeicherten Quotas eines Geräts einmischen (HTTP und MQTT
+/// liefern unterschiedliche Teilmengen). Gibt die zusammengeführten Werte zurück.
+pub fn merge_quotas(conn: &Connection, sn: &str, new: &serde_json::Map<String, Value>) -> Result<serde_json::Map<String, Value>> {
+    let mut merged = match get_quotas(conn, sn)? {
+        Some(Value::Object(m)) => m,
+        _ => serde_json::Map::new(),
+    };
+    for (k, v) in new {
+        merged.insert(k.clone(), v.clone());
+    }
+    conn.execute(
+        "UPDATE devices SET quotas=?2 WHERE sn=?1",
+        params![sn, serde_json::to_string(&merged)?],
+    )?;
+    Ok(merged)
 }
 
 pub fn device_soc_key(conn: &Connection, sn: &str) -> Result<String> {
