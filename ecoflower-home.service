@@ -5,13 +5,16 @@ Wants=network-online.target
 
 [Service]
 User=ecoflower
-WorkingDirectory=/var/lib/ecoflower-home
-Environment=DATABASE_PATH=/var/lib/ecoflower-home/ecoflower.db
+WorkingDirectory=/opt/ecoflower-home
+Environment=DATABASE_PATH=/opt/ecoflower-home/data/ecoflower.db
 Environment=BIND=0.0.0.0:8080
 Environment=WEB_USER=admin
 Environment=WEB_PASSWORD=bitte-aendern
-ExecStart=/usr/local/bin/ecoflower-home
-Restart=on-failure
+# Das Programm liegt in einem Ordner, der dem Dienstbenutzer gehört,
+# damit es sich über die Weboberfläche selbst aktualisieren kann.
+ExecStart=/opt/ecoflower-home/ecoflower-home
+Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target

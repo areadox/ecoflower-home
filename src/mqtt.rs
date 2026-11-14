@@ -171,6 +171,11 @@ fn handle_message(state: &AppState, topic: &str, payload: &[u8]) {
         return;
     };
     let now = chrono::Utc::now().timestamp();
+    state
+        .mqtt_raw
+        .lock()
+        .unwrap()
+        .insert(format!("{sn}/{kind}"), serde_json::json!({ "ts": now, "message": msg.clone() }));
     {
         let mut st = state.mqtt.lock().unwrap();
         st.last_message = Some(now);

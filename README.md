@@ -20,6 +20,8 @@ Ziel: **jedem Speicher eigene Regeln geben**, z. B. eigene Entladegrenzen pro Ge
   - optional mit **Zeitfenster** (auch über Mitternacht, z. B. 22:00–06:00)
 - **Testmodus** (Standard): Regeln protokollieren nur, was sie tun würden, und senden nichts
 - **Ereignisprotokoll** aller Aktionen und Fehler
+- **Updates per Klick** in der Weboberfläche (GitHub-Release, mit Prüfsummenkontrolle)
+- **Daten-Download** zur Fehlersuche (alle Werte, letzte MQTT-Nachrichten, Regeln, Ereignisse – ohne Secret Key)
 - Optionaler **Passwortschutz** (HTTP Basic Auth)
 
 ## Voraussetzungen
@@ -53,22 +55,43 @@ Damit der Container nach einem Neustart des Servers wieder startet, zusätzlich 
 
 Hinter einem Reverse-Proxy (Zoraxy, Caddy, nginx …) einfach auf Port 8080 weiterleiten.
 
-### Variante B: Fertige Programmdatei
+### Variante B: Fertige Programmdatei (empfohlen für Updates per Weboberfläche)
 
 Aus dem [Release](https://github.com/areadox/ecoflower-home/releases) herunterladen:
 
 - `ecoflower-home-linux-x86_64` für PCs und Server
 - `ecoflower-home-linux-aarch64` für ARM64, z. B. Raspberry Pi 4/5 mit 64-Bit-OS
 
-Beide laufen auf jedem Linux mit glibc ≥ 2.28 (Debian 10+, Ubuntu 20.04+). In den Befehlen unten den Dateinamen entsprechend anpassen.
+Beide laufen auf jedem Linux mit glibc ≥ 2.28 (Debian 10+, Ubuntu 20.04+).
 
 ```bash
-sudo install -m 755 ecoflower-home-linux-x86_64 /usr/local/bin/ecoflower-home
-sudo useradd --system --home /var/lib/ecoflower-home --create-home ecoflower
+sudo useradd --system --home /opt/ecoflower-home --create-home ecoflower
+sudo -u ecoflower wget -O /opt/ecoflower-home/ecoflower-home \
+  https://github.com/areadox/ecoflower-home/releases/latest/download/ecoflower-home-linux-x86_64
+sudo chmod 755 /opt/ecoflower-home/ecoflower-home
 sudo cp ecoflower-home.service /etc/systemd/system/   # vorher WEB_PASSWORD anpassen
 sudo systemctl daemon-reload
 sudo systemctl enable --now ecoflower-home
 ```
+
+#### Updates über die Weboberfläche
+
+Unter **Einstellungen → Update** prüft ecoflower-home, ob es auf GitHub eine neue Version gibt. Das passiert auch automatisch alle 6 Stunden; ein Hinweis erscheint dann oben rechts. Ein Klick auf „Update installieren“ lädt die passende Datei herunter, prüft die SHA-256-Prüfsumme, ersetzt die Programmdatei und startet das Programm neu. Die vorherige Version bleibt als `ecoflower-home.alt` im selben Ordner liegen.
+
+Dafür muss der Dienstbenutzer in den Ordner der Programmdatei schreiben dürfen. Das ist bei der Installation oben (`/opt/ecoflower-home`, gehört `ecoflower`) der Fall. **Umzug einer älteren Installation** aus `/usr/local/bin`:
+
+```bash
+sudo systemctl stop ecoflower-home
+sudo mkdir -p /opt/ecoflower-home/data
+sudo mv /usr/local/bin/ecoflower-home /opt/ecoflower-home/
+sudo cp /var/lib/ecoflower-home/ecoflower.db* /opt/ecoflower-home/data/ 2>/dev/null
+sudo chown -R ecoflower: /opt/ecoflower-home
+sudo cp ecoflower-home.service /etc/systemd/system/   # WEB_PASSWORD wieder eintragen
+sudo systemctl daemon-reload
+sudo systemctl start ecoflower-home
+```
+
+In Docker/Podman-Containern ist das Selbst-Update abgeschaltet; dort das Image neu bauen.
 
 ### Variante C: Selbst bauen
 

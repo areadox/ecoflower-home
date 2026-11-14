@@ -4,6 +4,7 @@ mod db;
 mod ecoflow;
 mod engine;
 mod mqtt;
+mod update;
 mod web;
 
 use std::sync::{Arc, Mutex};
@@ -14,6 +15,9 @@ pub struct AppState {
     pub poll_now: Notify,
     pub mqtt: Mutex<mqtt::MqttStatus>,
     pub mqtt_restart: Notify,
+    /// Letzte rohe MQTT-Nachricht je Gerät und Thema (für den Daten-Download)
+    pub mqtt_raw: Mutex<std::collections::BTreeMap<String, serde_json::Value>>,
+    pub update: Mutex<update::UpdateInfo>,
     pub web_user: String,
     pub web_password: Option<String>,
 }
@@ -37,6 +41,8 @@ async fn main() -> anyhow::Result<()> {
         poll_now: Notify::new(),
         mqtt: Mutex::new(mqtt::MqttStatus::default()),
         mqtt_restart: Notify::new(),
+        mqtt_raw: Mutex::new(Default::default()),
+        update: Mutex::new(update::UpdateInfo { current: update::CURRENT.into(), ..Default::default() }),
         web_user,
         web_password,
     });
@@ -47,6 +53,17 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::spawn(engine::run_poller(state.clone()));
     tokio::spawn(mqtt::run(state.clone()));
+    {
+        // Alle 6 Stunden nach einer neuen Version sehen
+        let state = state.clone();
+        tokio::spawn(async move {
+            loop {
+                let info = update::check().await;
+                *state.update.lock().unwrap() = info;
+                tokio::time::sleep(std::time::Duration::from_secs(6 * 3600)).await;
+            }
+        });
+    }
 
     let app = web::router(state);
     let listener = tokio::net::TcpListener::bind(&bind).await?;

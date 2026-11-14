@@ -42,10 +42,12 @@ async function loadBase() {
   [cache.status, cache.devices, cache.commands] = await Promise.all([api("/status"), api("/devices"), api("/commands")]);
   document.getElementById("version").textContent = "v" + cache.status.version;
   const m = cache.status.mqtt || {};
-  const mqttBadge = m.connected
+  const mqttBadge = !cache.status.configured ? "" : m.connected
     ? `<span class="badge ok" title="Live-Daten pro Gerät, ${m.messages} Nachrichten">MQTT verbunden</span>`
     : `<span class="badge err" title="${esc(m.error || "")}">MQTT getrennt</span>`;
-  document.getElementById("mode-badge").innerHTML = mqttBadge + " " + (cache.status.dry_run
+  const u = cache.status.update || {};
+  const updBadge = u.available ? `<a href="#/settings" class="badge warn" style="text-decoration:none">Update ${esc(u.latest)} verfügbar</a> ` : "";
+  document.getElementById("mode-badge").innerHTML = updBadge + mqttBadge + " " + (cache.status.dry_run
     ? '<span class="badge warn" title="Regeln senden keine Befehle, sie protokollieren nur">Testmodus</span>'
     : '<span class="badge ok">Regeln aktiv</span>');
 }
@@ -409,6 +411,46 @@ async function renderEvents() {
   $app.innerHTML = `<h1>Ereignisse</h1>${eventsTable(events)}`;
 }
 
+// ---------- Update ----------
+
+function renderUpdate(u) {
+  const el = document.getElementById("upd");
+  if (!el) return;
+  let html = `<dl class="kv"><dt>Installiert</dt><dd>${esc(u.current)}</dd>
+    <dt>Neueste Version</dt><dd>${u.latest ? `<a href="${esc(u.url)}" target="_blank" style="color:var(--accent)">${esc(u.latest)}</a>` : "–"}</dd>
+    <dt>Zuletzt geprüft</dt><dd>${fmtTime(u.checked_at)}</dd></dl>`;
+  if (u.error) html += `<div class="notice">Prüfung fehlgeschlagen: ${esc(u.error)}</div>`;
+  if (u.available && u.blocked) html += `<div class="notice">Update verfügbar, aber nicht automatisch installierbar: ${esc(u.blocked)}</div>`;
+  if (u.available && u.notes) html += `<details style="margin-top:10px"><summary>Was ist neu?</summary><pre>${esc(u.notes)}</pre></details>`;
+  html += `<div class="row" style="margin-top:12px">
+    <button class="secondary" id="upd-check">Nach Updates suchen</button>
+    ${u.available && !u.blocked ? `<button id="upd-install">Update auf ${esc(u.latest)} installieren</button>` : ""}</div>`;
+  if (!u.available && u.latest && !u.error) html += `<div class="muted" style="margin-top:8px">Sie verwenden die neueste Version.</div>`;
+  el.innerHTML = html;
+  document.getElementById("upd-check").onclick = () => guarded(async () => {
+    el.querySelector("#upd-check").disabled = true;
+    renderUpdate(await api("/update/check", { method: "POST" }));
+    await loadBase();
+  });
+  const inst = document.getElementById("upd-install");
+  if (inst) inst.onclick = () => guarded(async () => {
+    if (!confirm(`Update auf Version ${u.latest} installieren? Das Programm startet danach neu.`)) return;
+    inst.disabled = true;
+    inst.textContent = "Wird heruntergeladen …";
+    const r = await api("/update/install", { method: "POST" });
+    inst.textContent = "Neustart …";
+    // Warten, bis die neue Version antwortet
+    for (let i = 0; i < 60; i++) {
+      await new Promise(res => setTimeout(res, 2000));
+      try {
+        const st = await api("/status");
+        if (st.version === r.version) { toast(`Update auf ${r.version} abgeschlossen`); location.reload(); return; }
+      } catch { /* startet noch */ }
+    }
+    toast("Neustart dauert ungewöhnlich lange – bitte Seite neu laden", true);
+  });
+}
+
 // ---------- Einstellungen ----------
 
 async function renderSettings() {
@@ -432,7 +474,19 @@ async function renderSettings() {
       <label class="checkbox" style="margin-top:8px"><input type="checkbox" id="s-dry" ${s.dry_run ? "checked" : ""}>
         Testmodus – Regeln protokollieren nur und senden keine Befehle</label>
       <div class="row" style="margin-top:16px"><button id="s-save">Speichern</button></div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h3>Update</h3>
+      <div id="upd">Wird geladen …</div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h3>Daten-Download zur Fehlersuche</h3>
+      <div class="muted">Eine JSON-Datei mit allen Geräten, Messwerten, den letzten MQTT-Nachrichten, Regeln, Befehlen, dem Verlauf der letzten 24 Stunden und den letzten 500 Ereignissen. Secret Key und Passwörter sind nicht enthalten, der Access Key nur gekürzt.</div>
+      <div style="margin-top:12px"><a class="btn" href="/api/export" download style="display:inline-block;text-decoration:none">Daten herunterladen</a></div>
     </div>`;
+  renderUpdate(await api("/update"));
   document.getElementById("s-save").onclick = () => guarded(async () => {
     await api("/settings", { method: "POST", body: {
       access_key: document.getElementById("s-ak").value,

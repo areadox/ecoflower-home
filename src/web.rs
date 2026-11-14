@@ -48,7 +48,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/commands/{id}", delete(delete_command))
         .route("/rules", get(list_rules).post(save_rule))
         .route("/rules/{id}", delete(delete_rule))
-        .route("/events", get(list_events));
+        .route("/events", get(list_events))
+        .route("/export", get(export))
+        .route("/update", get(update_info))
+        .route("/update/check", post(update_check))
+        .route("/update/install", post(update_install));
 
     Router::new()
         .route("/", get(|| async { static_file("index.html") }))
@@ -107,6 +111,7 @@ async fn status(State(s): State<Arc<AppState>>) -> AppResult<Json<Value>> {
         "dry_run": st.dry_run,
         "poll_seconds": st.poll_seconds,
         "mqtt": *s.mqtt.lock().unwrap(),
+        "update": *s.update.lock().unwrap(),
     })))
 }
 
@@ -366,4 +371,97 @@ async fn list_events(State(s): State<Arc<AppState>>, Query(q): Query<EventQuery>
     let conn = s.db.lock().unwrap();
     let events = db::list_events(&conn, q.limit.unwrap_or(200).clamp(1, 2000), q.sn.as_deref())?;
     Ok(Json(json!(events)))
+}
+
+// ---------- Update ----------
+
+async fn update_info(State(s): State<Arc<AppState>>) -> AppResult<Json<Value>> {
+    let mut info = s.update.lock().unwrap().clone();
+    info.blocked = crate::update::update_blocker();
+    Ok(Json(json!(info)))
+}
+
+async fn update_check(State(s): State<Arc<AppState>>) -> AppResult<Json<Value>> {
+    let info = crate::update::check().await;
+    *s.update.lock().unwrap() = info.clone();
+    Ok(Json(json!(info)))
+}
+
+async fn update_install(State(s): State<Arc<AppState>>) -> AppResult<Json<Value>> {
+    let (version, exe) = crate::update::install()
+        .await
+        .map_err(|e| AppError(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    {
+        let conn = s.db.lock().unwrap();
+        db::log_event(&conn, "", "info", &format!("Update auf Version {version} installiert – Neustart"));
+    }
+    // Antwort zuerst senden, dann den Prozess durch die neue Version ersetzen.
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        let err = crate::update::restart(&exe);
+        tracing::error!("{err}");
+    });
+    Ok(Json(json!({ "ok": true, "version": version })))
+}
+
+// ---------- Daten-Download ----------
+
+/// Alle Daten zur Fehlersuche als JSON-Datei – ohne Secret Key und Passwörter.
+async fn export(State(s): State<Arc<AppState>>) -> AppResult<Response> {
+    let mqtt = s.mqtt.lock().unwrap().clone();
+    let mqtt_raw = s.mqtt_raw.lock().unwrap().clone();
+    let update = s.update.lock().unwrap().clone();
+    let body = {
+        let conn = s.db.lock().unwrap();
+        let st = db::load_settings(&conn)?;
+        let mask = |v: &str| {
+            if v.len() > 6 { format!("{}…{}", &v[..3], &v[v.len() - 3..]) } else if v.is_empty() { String::new() } else { "***".into() }
+        };
+        let devices = db::list_devices(&conn)?;
+        let mut device_data = serde_json::Map::new();
+        let since = chrono::Utc::now().timestamp() - 24 * 3600;
+        for d in &devices {
+            device_data.insert(
+                d.sn.clone(),
+                json!({
+                    "quotas": db::get_quotas(&conn, &d.sn)?.unwrap_or(json!({})),
+                    "history_24h": db::history(&conn, &d.sn, since)?,
+                }),
+            );
+        }
+        json!({
+            "export": {
+                "version": env!("CARGO_PKG_VERSION"),
+                "time": chrono::Utc::now().to_rfc3339(),
+                "arch": std::env::consts::ARCH,
+            },
+            "settings": {
+                "access_key": mask(&st.access_key),
+                "secret_key_set": !st.secret_key.is_empty(),
+                "api_url": st.api_url,
+                "poll_seconds": st.poll_seconds,
+                "dry_run": st.dry_run,
+                "mqtt_enabled": st.mqtt_enabled,
+                "retention_days": st.retention_days,
+            },
+            "mqtt": mqtt,
+            "mqtt_last_messages": mqtt_raw,
+            "update": update,
+            "devices": devices,
+            "device_data": device_data,
+            "commands": db::list_commands(&conn)?,
+            "rules": db::list_rules(&conn, None)?,
+            "events": db::list_events(&conn, 500, None)?,
+        })
+    };
+    let name = format!("ecoflower-debug-{}.json", chrono::Local::now().format("%Y%m%d-%H%M"));
+    let text = serde_json::to_string_pretty(&body)?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/json; charset=utf-8".to_string()),
+            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{name}\"")),
+        ],
+        text,
+    )
+        .into_response())
 }
