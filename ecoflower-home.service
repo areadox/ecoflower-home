@@ -1,0 +1,17 @@
+[Unit]
+Description=ecoflower-home – Verwaltung von EcoFlow-STREAM-Speichern
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ecoflower
+WorkingDirectory=/var/lib/ecoflower-home
+Environment=DATABASE_PATH=/var/lib/ecoflower-home/ecoflower.db
+Environment=BIND=0.0.0.0:8080
+Environment=WEB_USER=admin
+Environment=WEB_PASSWORD=bitte-aendern
+ExecStart=/usr/local/bin/ecoflower-home
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

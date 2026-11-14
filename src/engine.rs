@@ -1,0 +1,398 @@
+//! Abfrage-Schleife und Regel-Engine.
+
+use crate::db::{self, Rule};
+use crate::ecoflow::{as_f64, EcoFlowClient};
+use crate::AppState;
+use anyhow::{anyhow, bail, Result};
+use chrono::{Local, NaiveTime, Timelike};
+use serde_json::{Map, Value};
+use std::sync::Arc;
+use std::time::Duration;
+
+/// Mindestabstand zwischen zwei Sendeversuchen derselben Regel.
+const RULE_COOLDOWN_SECS: i64 = 600;
+/// Abstand für erneute Versuche, nachdem das Gerät einen Wert abgelehnt hat.
+const RULE_RETRY_AFTER_REJECT_SECS: i64 = 3600;
+/// Reihenfolge, in der der Ladestand eines einzelnen Geräts gesucht wird.
+const SOC_KEYS: [&str; 4] = ["bmsBattSoc", "soc", "f32ShowSoc", "cmsBattSoc"];
+const ROLE_KEYS: [&str; 2] = ["distributedDeviceStatus", "seriesConnectDeviceStatus"];
+
+pub fn client(state: &AppState) -> Result<EcoFlowClient> {
+    let s = {
+        let conn = state.db.lock().unwrap();
+        db::load_settings(&conn)?
+    };
+    if s.access_key.is_empty() || s.secret_key.is_empty() {
+        bail!("Access Key und Secret Key fehlen (Einstellungen)");
+    }
+    EcoFlowClient::new(&s.api_url, &s.access_key, &s.secret_key)
+}
+
+/// Platzhalter `{{sn}}` und `{{value}}` in einer Befehlsvorlage ersetzen.
+pub fn render_command(template: &str, sn: &str, value: &str) -> Result<Value> {
+    let v = value.trim();
+    let literal = if v.is_empty() {
+        "null".to_string()
+    } else if v == "true" || v == "false" {
+        v.to_string()
+    } else if let Ok(n) = v.replace(',', ".").parse::<f64>() {
+        if n.fract() == 0.0 { format!("{}", n as i64) } else { n.to_string() }
+    } else {
+        serde_json::to_string(v)?
+    };
+    let sn_escaped = serde_json::to_string(sn)?;
+    let sn_inner = &sn_escaped[1..sn_escaped.len() - 1];
+    let text = template.replace("{{sn}}", sn_inner).replace("{{value}}", &literal);
+    serde_json::from_str(&text).map_err(|e| anyhow!("Befehl ist kein gültiges JSON ({e}): {text}"))
+}
+
+pub fn pick_soc(quotas: &Map<String, Value>, override_key: &str) -> Option<f64> {
+    if !override_key.is_empty() {
+        return quotas.get(override_key).and_then(as_f64);
+    }
+    SOC_KEYS
+        .iter()
+        .filter_map(|k| quotas.get(*k).and_then(as_f64))
+        .find(|v| *v > 0.0)
+        .or_else(|| SOC_KEYS.iter().find_map(|k| quotas.get(*k).and_then(as_f64)))
+}
+
+fn pick_role(quotas: &Map<String, Value>) -> String {
+    ROLE_KEYS
+        .iter()
+        .find_map(|k| quotas.get(*k).and_then(|v| v.as_str()).map(String::from))
+        .unwrap_or_default()
+}
+
+/// Ein Gerät abfragen, Werte speichern und dessen Regeln auswerten.
+pub async fn poll_device(state: &Arc<AppState>, client: &EcoFlowClient, sn: &str) -> Result<()> {
+    let now = chrono::Utc::now().timestamp();
+    match client.quota_all(sn).await {
+        Ok(quotas) => {
+            {
+                let conn = state.db.lock().unwrap();
+                let soc_key = db::device_soc_key(&conn, sn)?;
+                let soc = pick_soc(&quotas, &soc_key);
+                let role = pick_role(&quotas);
+                let num = |k: &str| quotas.get(k).and_then(as_f64);
+                let prev_err: Option<String> = conn
+                    .query_row("SELECT last_error FROM devices WHERE sn = ?1", [sn], |r| r.get(0))
+                    .unwrap_or(None);
+                if prev_err.is_some() {
+                    db::log_event(&conn, sn, "info", "Gerät antwortet wieder");
+                }
+                conn.execute(
+                    "UPDATE devices SET quotas=?2, soc=?3, role=?4, last_poll=?5, last_error=NULL, online=1 WHERE sn=?1",
+                    rusqlite::params![sn, serde_json::to_string(&quotas)?, soc, role, now],
+                )?;
+                conn.execute(
+                    "INSERT INTO samples (sn, ts, soc, battery_w, min_dsg, max_chg, backup) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                    rusqlite::params![
+                        sn,
+                        now,
+                        soc,
+                        num("powGetBpCms"),
+                        num("cmsMinDsgSoc"),
+                        num("cmsMaxChgSoc"),
+                        num("backupReverseSoc")
+                    ],
+                )?;
+            }
+            evaluate_rules(state, client, sn, &quotas).await;
+            Ok(())
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            let conn = state.db.lock().unwrap();
+            let prev_err: Option<String> = conn
+                .query_row("SELECT last_error FROM devices WHERE sn = ?1", [sn], |r| r.get(0))
+                .unwrap_or(None);
+            if prev_err.as_deref() != Some(msg.as_str()) {
+                db::log_event(&conn, sn, "error", &format!("Abfrage fehlgeschlagen: {msg}"));
+            }
+            conn.execute("UPDATE devices SET last_error=?2 WHERE sn=?1", rusqlite::params![sn, msg])?;
+            Err(e)
+        }
+    }
+}
+
+/// Endlosschleife: alle aktiven Geräte regelmäßig abfragen.
+pub async fn run_poller(state: Arc<AppState>) {
+    let mut last_cleanup = 0i64;
+    loop {
+        let settings = {
+            let conn = state.db.lock().unwrap();
+            db::load_settings(&conn).unwrap_or_default()
+        };
+        match client(&state) {
+            Ok(client) => {
+                let sns: Vec<String> = {
+                    let conn = state.db.lock().unwrap();
+                    db::list_devices(&conn)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|d| d.enabled)
+                        .map(|d| d.sn)
+                        .collect()
+                };
+                for sn in sns {
+                    let _ = poll_device(&state, &client, &sn).await;
+                }
+            }
+            Err(e) => tracing::debug!("Abfrage übersprungen: {e}"),
+        }
+
+        let now = chrono::Utc::now().timestamp();
+        if now - last_cleanup > 3600 {
+            let conn = state.db.lock().unwrap();
+            if let Err(e) = db::cleanup(&conn, settings.retention_days) {
+                tracing::warn!("Aufräumen fehlgeschlagen: {e}");
+            }
+            last_cleanup = now;
+        }
+
+        let wait = Duration::from_secs(settings.poll_seconds.max(10));
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => {}
+            _ = state.poll_now.notified() => {}
+        }
+    }
+}
+
+fn parse_time(s: &str) -> Option<NaiveTime> {
+    NaiveTime::parse_from_str(s.trim(), "%H:%M").ok()
+}
+
+/// Liegt die aktuelle Uhrzeit im Zeitfenster der Regel? (Leer = immer.)
+pub fn in_window(start: &str, end: &str, now: NaiveTime) -> bool {
+    match (parse_time(start), parse_time(end)) {
+        (Some(s), Some(e)) if s <= e => now >= s && now < e,
+        (Some(s), Some(e)) => now >= s || now < e, // über Mitternacht
+        _ => true,
+    }
+}
+
+/// Befehl ausführen (oder im Testmodus nur protokollieren).
+pub async fn execute(
+    state: &Arc<AppState>,
+    client: &EcoFlowClient,
+    sn: &str,
+    command_id: i64,
+    value: &str,
+    origin: &str,
+) -> Result<()> {
+    let (cmd, dry_run) = {
+        let conn = state.db.lock().unwrap();
+        let cmd = db::get_command(&conn, command_id)?.ok_or_else(|| anyhow!("Befehl {command_id} existiert nicht"))?;
+        (cmd, db::load_settings(&conn)?.dry_run)
+    };
+    let payload = render_command(&cmd.template, sn, value)?;
+    if dry_run {
+        let conn = state.db.lock().unwrap();
+        db::log_event(&conn, sn, "info", &format!("[Testmodus] {origin}: würde „{}“ = {value} senden", cmd.name));
+        return Ok(());
+    }
+    match client.set_quota(payload).await {
+        Ok(_) => {
+            let conn = state.db.lock().unwrap();
+            db::log_event(&conn, sn, "info", &format!("{origin}: „{}“ = {value} gesendet", cmd.name));
+            Ok(())
+        }
+        Err(e) => {
+            let conn = state.db.lock().unwrap();
+            db::log_event(&conn, sn, "error", &format!("{origin}: „{}“ = {value} fehlgeschlagen: {e}", cmd.name));
+            Err(e)
+        }
+    }
+}
+
+async fn evaluate_rules(state: &Arc<AppState>, client: &EcoFlowClient, sn: &str, quotas: &Map<String, Value>) {
+    let (rules, soc_key) = {
+        let conn = state.db.lock().unwrap();
+        (db::list_rules(&conn, Some(sn)).unwrap_or_default(), db::device_soc_key(&conn, sn).unwrap_or_default())
+    };
+    let now = chrono::Utc::now().timestamp();
+    let local = Local::now().time().with_second(0).unwrap_or_default();
+    for rule in rules.into_iter().filter(|r| r.enabled) {
+        let res = match rule.kind.as_str() {
+            "keep" => eval_keep(state, client, &rule, quotas, now, local).await,
+            "threshold" => eval_threshold(state, client, &rule, pick_soc(quotas, &soc_key), local).await,
+            other => Err(anyhow!("Unbekannter Regeltyp {other}")),
+        };
+        if let Err(e) = res {
+            tracing::warn!("Regel „{}“: {e}", rule.name);
+        }
+    }
+}
+
+/// „Wert halten“: Befehl senden, solange der zurückgelesene Wert vom Sollwert abweicht.
+async fn eval_keep(
+    state: &Arc<AppState>,
+    client: &EcoFlowClient,
+    rule: &Rule,
+    quotas: &Map<String, Value>,
+    now: i64,
+    local: NaiveTime,
+) -> Result<()> {
+    let set = |st: &str, ts: i64, pending: bool| {
+        let conn = state.db.lock().unwrap();
+        db::update_rule_state(&conn, rule.id, st, ts, pending)
+    };
+    let cmd_id = rule.command_id.ok_or_else(|| anyhow!("kein Befehl gewählt"))?;
+    if !in_window(&rule.window_start, &rule.window_end, local) {
+        if rule.last_state != "outside" {
+            set("outside", rule.last_action_ts, false)?;
+        }
+        return Ok(());
+    }
+
+    let target = rule.value.replace(',', ".");
+    let target_num = match target.as_str() {
+        "true" => Some(1.0),
+        "false" => Some(0.0),
+        t => t.parse::<f64>().ok(),
+    };
+    let current = if rule.read_key.is_empty() { None } else { quotas.get(&rule.read_key).and_then(as_f64) };
+
+    let matches = match (current, target_num) {
+        (Some(c), Some(t)) => (c - t).abs() < 0.5,
+        _ => false,
+    };
+
+    if rule.read_key.is_empty() {
+        // Ohne Rücklese-Wert nur einmal pro Zeitfenster senden.
+        if rule.last_state != "sent" {
+            execute(state, client, &rule.sn, cmd_id, &rule.value, &format!("Regel „{}“", rule.name)).await?;
+            set("sent", now, false)?;
+        }
+        return Ok(());
+    }
+
+    if matches {
+        if rule.pending_check {
+            let conn = state.db.lock().unwrap();
+            db::log_event(
+                &conn,
+                &rule.sn,
+                "info",
+                &format!("Regel „{}“: Gerät hat {} = {} übernommen ✔", rule.name, rule.read_key, rule.value),
+            );
+        }
+        if rule.last_state != "ok" || rule.pending_check {
+            set("ok", rule.last_action_ts, false)?;
+        }
+        return Ok(());
+    }
+
+    if rule.pending_check && now - rule.last_action_ts >= 120 {
+        let conn = state.db.lock().unwrap();
+        db::log_event(
+            &conn,
+            &rule.sn,
+            "warn",
+            &format!(
+                "Regel „{}“: Gerät meldet weiterhin {} = {} statt {} – Wert wurde nicht übernommen oder vom System überschrieben",
+                rule.name,
+                rule.read_key,
+                current.map(|c| c.to_string()).unwrap_or_else(|| "–".into()),
+                rule.value
+            ),
+        );
+        drop(conn);
+        set("rejected", rule.last_action_ts, false)?;
+        return Ok(());
+    }
+
+    // Nach einer Ablehnung nur noch stündlich erneut versuchen.
+    let cooldown = if rule.last_state == "rejected" { RULE_RETRY_AFTER_REJECT_SECS } else { RULE_COOLDOWN_SECS };
+    if !rule.pending_check && now - rule.last_action_ts >= cooldown {
+        execute(state, client, &rule.sn, cmd_id, &rule.value, &format!("Regel „{}“", rule.name)).await?;
+        let dry_run = {
+            let conn = state.db.lock().unwrap();
+            db::load_settings(&conn)?.dry_run
+        };
+        set("sent", now, !dry_run)?;
+    }
+    Ok(())
+}
+
+/// „Schwellwert“: unter X % Befehl A, über Y % Befehl B (mit Hysterese).
+async fn eval_threshold(
+    state: &Arc<AppState>,
+    client: &EcoFlowClient,
+    rule: &Rule,
+    soc: Option<f64>,
+    local: NaiveTime,
+) -> Result<()> {
+    let now = chrono::Utc::now().timestamp();
+    let set = |st: &str| {
+        let conn = state.db.lock().unwrap();
+        db::update_rule_state(&conn, rule.id, st, now, false)
+    };
+    let origin = format!("Regel „{}“", rule.name);
+
+    if !in_window(&rule.window_start, &rule.window_end, local) {
+        // Außerhalb des Zeitfensters den Normalzustand („oberhalb“) wiederherstellen.
+        if rule.last_state == "below" {
+            if let Some(cmd) = rule.above_command_id {
+                execute(state, client, &rule.sn, cmd, &rule.above_value, &format!("{origin} (Zeitfenster vorbei)")).await?;
+            }
+        }
+        if rule.last_state != "outside" {
+            set("outside")?;
+        }
+        return Ok(());
+    }
+
+    let soc = soc.ok_or_else(|| anyhow!("kein Ladestand verfügbar"))?;
+    if let Some(below) = rule.below {
+        if soc <= below && rule.last_state != "below" {
+            if let Some(cmd) = rule.below_command_id {
+                execute(state, client, &rule.sn, cmd, &rule.below_value, &format!("{origin} (Ladestand {soc:.0} % ≤ {below} %)")).await?;
+            }
+            set("below")?;
+            return Ok(());
+        }
+    }
+    if let Some(above) = rule.above {
+        if soc >= above && rule.last_state != "above" {
+            if let Some(cmd) = rule.above_command_id {
+                execute(state, client, &rule.sn, cmd, &rule.above_value, &format!("{origin} (Ladestand {soc:.0} % ≥ {above} %)")).await?;
+            }
+            set("above")?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn vorlage_wird_befuellt() {
+        let tpl = r#"{"sn":"{{sn}}","cmdId":17,"params":{"cfgMinDsgSoc":{{value}}}}"#;
+        assert_eq!(render_command(tpl, "BK123", "20").unwrap(), json!({"sn":"BK123","cmdId":17,"params":{"cfgMinDsgSoc":20}}));
+        assert_eq!(render_command(tpl, "BK123", "false").unwrap()["params"]["cfgMinDsgSoc"], json!(false));
+        assert!(render_command("{kaputt", "x", "1").is_err());
+    }
+
+    #[test]
+    fn zeitfenster() {
+        let t = |s| NaiveTime::parse_from_str(s, "%H:%M").unwrap();
+        assert!(in_window("", "", t("03:00")));
+        assert!(in_window("08:00", "18:00", t("12:00")));
+        assert!(!in_window("08:00", "18:00", t("19:00")));
+        assert!(in_window("22:00", "06:00", t("23:30")));
+        assert!(in_window("22:00", "06:00", t("05:00")));
+        assert!(!in_window("22:00", "06:00", t("12:00")));
+    }
+
+    #[test]
+    fn ladestand_auswahl() {
+        let q: Map<String, Value> = serde_json::from_value(json!({"cmsBattSoc": 0.0, "soc": 47, "bmsBattSoc": 0})).unwrap();
+        assert_eq!(pick_soc(&q, ""), Some(47.0));
+        assert_eq!(pick_soc(&q, "cmsBattSoc"), Some(0.0));
+    }
+}
