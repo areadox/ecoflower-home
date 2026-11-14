@@ -129,6 +129,19 @@ function systemCard(devs) {
     </div></div>`;
 }
 
+const ACT = {
+  charging: { icon: "▲", text: "lädt", cls: "act-charge" },
+  discharging: { icon: "▼", text: "entlädt", cls: "act-discharge" },
+  idle: { icon: "●", text: "Standby", cls: "act-idle" },
+};
+
+function activityBadge(a) {
+  if (!a) return `<span class="act act-unknown" title="Zustand erst mit MQTT-Live-Daten bekannt">? unbekannt</span>`;
+  const x = ACT[a.state] || ACT.idle;
+  const p = a.power_w != null && a.state !== "idle" ? ` · ${Math.round(a.power_w)} W` : "";
+  return `<span class="act ${x.cls}" title="Quelle: ${esc(a.source)}">${x.icon} ${x.text}${p}</span>`;
+}
+
 const onOff = v => (v === null || v === undefined ? "–" : v ? "an" : "aus");
 
 function deviceCard(d) {
@@ -141,7 +154,7 @@ function deviceCard(d) {
   return `<div class="card"><a href="#/device/${encodeURIComponent(d.sn)}">
     <h3><span>${esc(devName(d))}</span><span>${role} ${state}</span></h3>
     <div class="muted">${esc(d.product)} · ${esc(d.sn)}</div>
-    <div class="soc">${fmtNum(d.soc, " %")}</div>
+    <div class="soc-row"><div class="soc">${fmtNum(d.soc, " %")}</div>${activityBadge(d.activity)}</div>
     <div class="bar"><div style="width:${soc}%"></div></div>${socHint}
     <dl class="kv">
       <dt>AC-Leistung (Gerät)</dt><dd>${fmtNum(d.ac_w, " W")}</dd>

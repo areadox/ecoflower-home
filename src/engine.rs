@@ -71,6 +71,54 @@ pub fn pick_role(quotas: &Map<String, Value>) -> String {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Activity {
+    /// "charging", "discharging" oder "idle"
+    pub state: &'static str,
+    /// Aus welchem Wert der Zustand stammt (zur Nachvollziehbarkeit)
+    pub source: &'static str,
+    /// Batterieleistung des Geräts in W (Betrag), falls bekannt
+    pub power_w: Option<f64>,
+}
+
+/// Was macht der Speicher gerade? Reihenfolge der Quellen:
+/// 1. `bmsChgDsgState` (MQTT, pro Gerät): 0 = Standby, 1 = Entladen, 2 = Laden
+/// 2. Akkustrom `amp` (mA) mit Vorzeichen (MQTT, pro Gerät)
+/// 3. nur Hauptgerät: `cmsChgDsgState` bzw. Vorzeichen von `powGetBpCms` (Systemwerte)
+pub fn pick_activity(quotas: &Map<String, Value>, role: &str) -> Option<Activity> {
+    let num = |k: &str| quotas.get(k).and_then(as_f64);
+    // Leistung pro Gerät aus Strom (mA) × Spannung (mV)
+    let unit_power = match (num("amp"), num("vol")) {
+        (Some(a), Some(v)) if v > 0.0 => Some(a * v / 1_000_000.0),
+        _ => None,
+    };
+    let from_code = |c: f64| match c as i64 {
+        1 => Some("discharging"),
+        2 => Some("charging"),
+        0 => Some("idle"),
+        _ => None,
+    };
+    if let Some(state) = num("bmsChgDsgState").and_then(from_code) {
+        return Some(Activity { state, source: "bmsChgDsgState", power_w: unit_power.map(f64::abs) });
+    }
+    if let Some(p) = unit_power {
+        let state = if p > 10.0 { "charging" } else if p < -10.0 { "discharging" } else { "idle" };
+        return Some(Activity { state, source: "amp×vol", power_w: Some(p.abs()) });
+    }
+    if role == "MASTER" {
+        let sys_power = num("powGetBpCms");
+        if let Some(state) = num("cmsChgDsgState").and_then(from_code) {
+            return Some(Activity { state, source: "cmsChgDsgState (System)", power_w: sys_power.map(f64::abs) });
+        }
+        if let Some(p) = sys_power {
+            // EcoFlow: positiv = Laden, negativ = Entladen
+            let state = if p > 20.0 { "charging" } else if p < -20.0 { "discharging" } else { "idle" };
+            return Some(Activity { state, source: "powGetBpCms (System)", power_w: Some(p.abs()) });
+        }
+    }
+    None
+}
+
 /// Neue Werte (HTTP oder MQTT) speichern und Ladestand/Rolle neu bestimmen.
 pub fn apply_quotas(
     conn: &rusqlite::Connection,
@@ -402,6 +450,22 @@ mod tests {
     }
 
     #[test]
+    fn zustand_erkennen() {
+        let q = |v: Value| -> Map<String, Value> { serde_json::from_value(v).unwrap() };
+        let a = pick_activity(&q(json!({"bmsChgDsgState": 2, "amp": 44671, "vol": 20161})), "SLAVE").unwrap();
+        assert_eq!(a.state, "charging");
+        assert_eq!(a.power_w.map(|p| p.round()), Some(901.0));
+        assert_eq!(pick_activity(&q(json!({"bmsChgDsgState": 1})), "SLAVE").unwrap().state, "discharging");
+        assert_eq!(pick_activity(&q(json!({"bmsChgDsgState": 0})), "SLAVE").unwrap().state, "idle");
+        assert_eq!(pick_activity(&q(json!({"amp": -5000, "vol": 20000})), "SLAVE").unwrap().state, "discharging");
+        // Nur HTTP: Hauptgerät über powGetBpCms, Nebengerät unbekannt
+        assert_eq!(pick_activity(&q(json!({"powGetBpCms": 1499.4})), "MASTER").unwrap().state, "charging");
+        assert_eq!(pick_activity(&q(json!({"powGetBpCms": -300.0})), "MASTER").unwrap().state, "discharging");
+        assert_eq!(pick_activity(&q(json!({"powGetBpCms": 0.0})), "MASTER").unwrap().state, "idle");
+        assert_eq!(pick_activity(&q(json!({"powGetBpCms": 0.0})), "SLAVE"), None);
+    }
+
+    #[test]
     fn zeitfenster() {
         let t = |s| NaiveTime::parse_from_str(s, "%H:%M").unwrap();
         assert!(in_window("", "", t("03:00")));
@@ -421,6 +485,7 @@ mod tests {
         let neben: Map<String, Value> = serde_json::from_value(json!({"cmsBattSoc": 0.0})).unwrap();
         assert_eq!(pick_soc(&neben, ""), None);
         assert_eq!(pick_role(&neben), "SLAVE");
+        assert_eq!(pick_activity(&neben, "SLAVE"), None);
         let haupt: Map<String, Value> = serde_json::from_value(json!({"cmsBattSoc": 78.0})).unwrap();
         assert_eq!(pick_soc(&haupt, ""), Some(78.0));
         assert_eq!(pick_role(&haupt), "MASTER");

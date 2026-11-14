@@ -65,3 +65,9 @@ pre { background: var(--bg); border: 1px solid var(--line); padding: 10px; borde
 .checkbox input { width: auto; }
 .card.system { margin-bottom: 8px; }
 .card.system .kv { margin-top: 0; }
+.soc-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.act { font-size: 13px; font-weight: 600; padding: 4px 10px; border-radius: 12px; white-space: nowrap; }
+.act-charge { color: var(--ok); background: rgba(76, 194, 122, .12); }
+.act-discharge { color: var(--warn); background: rgba(224, 168, 58, .12); }
+.act-idle { color: var(--muted); background: var(--panel2); }
+.act-unknown { color: var(--muted); background: var(--panel2); font-weight: 400; }

@@ -9,7 +9,7 @@ Ziel: **jedem Speicher eigene Regeln geben**, z. B. eigene Entladegrenzen pro Ge
 ## Funktionen
 
 - **Geräteverwaltung:** Alle Geräte des EcoFlow-Kontos abrufen, Anzeigenamen vergeben, Abfrage pro Gerät an- und ausschalten, Haupt- und Nebengerät erkennen
-- **Übersicht:** Systemwerte (Gesamtladestand, Solar, Netz, Hausverbrauch, Grenzen) und pro Speicher Ladestand, AC-Leistung und AC-Ausgänge
+- **Übersicht:** Systemwerte (Gesamtladestand, Solar, Netz, Hausverbrauch, Grenzen) und pro Speicher Ladestand, **aktueller Zustand (lädt / entlädt / Standby mit Leistung)**, AC-Leistung und AC-Ausgänge
 - **Live-Daten über MQTT:** Die HTTP-Schnittstelle von EcoFlow liefert bei STREAM nur wenige Systemwerte. Der Ladestand der einzelnen Speicher und die Rolle (Haupt/Neben) kommen über den MQTT-Broker der Open-API. ecoflower-home verbindet sich automatisch damit.
 - **Verlauf:** Ladestand und gemeldete Entladegrenze der letzten 24 Stunden als Diagramm (in SQLite gespeichert, Aufbewahrung einstellbar)
 - **Alle Messwerte (Quotas)** eines Geräts durchsuchbar, z. B. um herauszufinden, welche Werte ein Gerät liefert
@@ -133,6 +133,7 @@ Erkenntnisse aus dem Betrieb mit Ultra X (Hauptgerät), Ultra und zwei AC Pro:
 - **HTTP** (`quota/all`) liefert pro Gerät nur 15 Werte. Fast alle davon sind **Systemwerte**, die nur das Hauptgerät sinnvoll meldet (`cmsBattSoc`, `powGetPvSum`, `powGetSysGrid`, `powGetSysLoad`, `powGetBpCms`). Nebengeräte melden dort 0. **Pro Gerät** sind nur `gridConnectionPower` sowie die AC-Ausgänge `relay2Onoff`/`relay3Onoff` dabei.
 - **Haupt- oder Nebengerät:** ohne MQTT daran erkannt, dass nur das Hauptgerät einen `cmsBattSoc` über 0 meldet
 - **Ladestand pro Speicher** (`bmsBattSoc`/`soc`) kommt nur über **MQTT**
+- **Zustand pro Speicher** (lädt/entlädt/Standby) ebenfalls nur über MQTT: `bmsChgDsgState` (0 = Standby, 1 = Entladen, 2 = Laden), ersatzweise der Akkustrom `amp` × `vol`. Ohne MQTT ist der Zustand nur beim Hauptgerät bekannt (Vorzeichen von `powGetBpCms`, positiv = Laden), alle anderen zeigen „unbekannt“.
 - **Backup-Reserve** gilt immer für das ganze System. Wird sie an einem Gerät gesetzt, übernehmen alle Geräte den Wert.
 - Lade- und Entladegrenze melden alle Geräte gleich. Ob ein Nebengerät eine eigene Grenze annimmt, zeigt die Regel „Wert halten“ (Status „übernommen“ oder „nicht übernommen“).
 

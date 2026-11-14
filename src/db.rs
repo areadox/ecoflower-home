@@ -232,6 +232,7 @@ pub struct Device {
     pub grid_w: Option<f64>,
     pub load_w: Option<f64>,
     pub mqtt_ts: Option<i64>,
+    pub activity: Option<crate::engine::Activity>,
 }
 
 pub fn list_devices(conn: &Connection) -> Result<Vec<Device>> {
@@ -244,6 +245,8 @@ pub fn list_devices(conn: &Connection) -> Result<Vec<Device>> {
             let quotas: Option<String> = r.get(11)?;
             let q: Value = quotas.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null);
             let num = |k: &str| q.get(k).and_then(crate::ecoflow::as_f64);
+            let role: String = r.get(7)?;
+            let activity = q.as_object().and_then(|m| crate::engine::pick_activity(m, &role));
             Ok(Device {
                 sn: r.get(0)?,
                 name: r.get(1)?,
@@ -252,7 +255,7 @@ pub fn list_devices(conn: &Connection) -> Result<Vec<Device>> {
                 online: r.get::<_, i64>(4)? != 0,
                 enabled: r.get::<_, i64>(5)? != 0,
                 soc_key: r.get(6)?,
-                role: r.get(7)?,
+                role,
                 soc: r.get(8)?,
                 last_poll: r.get(9)?,
                 last_error: r.get(10)?,
@@ -268,6 +271,7 @@ pub fn list_devices(conn: &Connection) -> Result<Vec<Device>> {
                 grid_w: num("powGetSysGrid"),
                 load_w: num("powGetSysLoad"),
                 mqtt_ts: num("quota_mqtt_ts").map(|v| v as i64),
+                activity,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;

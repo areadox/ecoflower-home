@@ -1,10 +1,11 @@
-### Neu in 0.0.3
-- **Update per Klick:** Unter *Einstellungen → Update* nach neuen Versionen suchen und installieren – mit SHA-256-Prüfung, automatischem Neustart und Sicherung der alten Version (`ecoflower-home.alt`). Alle 6 Stunden wird automatisch geprüft, ein Hinweis erscheint oben rechts.
-- **Daten-Download zur Fehlersuche:** Unter *Einstellungen* alle Geräte, Messwerte, die letzten MQTT-Nachrichten, Regeln, Befehle, Verlauf (24 h) und Ereignisse als JSON-Datei – ohne Secret Key und Passwörter.
-- systemd-Unit: Programm liegt jetzt in `/opt/ecoflower-home` (gehört dem Dienstbenutzer), `Restart=always`
+### Neu in 0.0.4
+- **Zustand pro Speicher in der Übersicht:** ▲ lädt / ▼ entlädt / ● Standby, jeweils mit Batterieleistung
+  - Quelle pro Gerät über MQTT: `bmsChgDsgState`, ersatzweise Akkustrom × Spannung
+  - ohne MQTT nur beim Hauptgerät (über die Systemleistung `powGetBpCms`), sonst „unbekannt“
+  - Mauszeiger auf die Anzeige zeigt, aus welchem Wert der Zustand stammt
 
-### Einmalig nötig: Umzug nach /opt
-Damit sich das Programm selbst aktualisieren kann, muss es in einem Ordner liegen, der dem Dienstbenutzer gehört. Anleitung in der README unter **„Updates über die Weboberfläche“**. Danach sind keine Konsolenbefehle für Updates mehr nötig.
+### Update
+In der Weboberfläche unter *Einstellungen → Update* (ab 0.0.3 nach dem einmaligen Umzug nach `/opt/ecoflower-home`, siehe README).
 
 ### Download
 - `ecoflower-home-linux-x86_64`: Linux x86_64 (PC/Server), glibc ≥ 2.28
