@@ -39,6 +39,15 @@ docker compose up -d --build
 
 Danach ist die Oberfläche unter `http://<server>:8080` erreichbar. Die Datenbank liegt in `./data/`.
 
+**Mit Podman statt Docker:** Der alte `docker-compose` 1.29 (Python) läuft unter Python 3.12 nicht mehr (Fehler `No module named 'distutils'`). Stattdessen `podman-compose` verwenden:
+
+```bash
+sudo apt install podman-compose
+podman-compose up -d --build
+```
+
+Damit der Container nach einem Neustart des Servers wieder startet, zusätzlich einmal `sudo systemctl enable --now podman-restart.service` ausführen.
+
 Hinter einem Reverse-Proxy (Zoraxy, Caddy, nginx …) einfach auf Port 8080 weiterleiten.
 
 ### Variante B: Fertige Programmdatei
