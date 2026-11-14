@@ -41,9 +41,14 @@ Danach ist die Oberfläche unter `http://<server>:8080` erreichbar. Die Datenban
 
 Hinter einem Reverse-Proxy (Zoraxy, Caddy, nginx …) einfach auf Port 8080 weiterleiten.
 
-### Variante B: Fertige Programmdatei (Linux x86_64)
+### Variante B: Fertige Programmdatei
 
-Die Datei `ecoflower-home-linux-x86_64` aus dem [Release](https://github.com/areadox/ecoflower-home/releases) herunterladen. Sie läuft auf jedem Linux mit glibc ≥ 2.28 (Debian 10+, Ubuntu 20.04+).
+Aus dem [Release](https://github.com/areadox/ecoflower-home/releases) herunterladen:
+
+- `ecoflower-home-linux-x86_64` für PCs und Server
+- `ecoflower-home-linux-aarch64` für ARM64, z. B. Raspberry Pi 4/5 mit 64-Bit-OS
+
+Beide laufen auf jedem Linux mit glibc ≥ 2.28 (Debian 10+, Ubuntu 20.04+). In den Befehlen unten den Dateinamen entsprechend anpassen.
 
 ```bash
 sudo install -m 755 ecoflower-home-linux-x86_64 /usr/local/bin/ecoflower-home
@@ -108,6 +113,7 @@ Die Backup-Reserve muss laut Gerät mindestens 3 % über der Entladegrenze liege
 - Weboberfläche: reines HTML/CSS/JavaScript, in die Programmdatei eingebettet, kein Build-Schritt nötig
 - Die gesamte Anwendung ist eine einzige Datei; alle Daten liegen in einer SQLite-Datei
 - API-Signatur: HMAC-SHA256 nach EcoFlow-Dokumentation
+- Releases: Ein Tag `v*` startet den GitHub-Actions-Workflow, der die Programmdateien baut und das Release anlegt
 
 ## Hinweis
 
