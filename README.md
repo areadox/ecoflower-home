@@ -48,6 +48,8 @@ podman-compose up -d --build
 
 Damit der Container nach einem Neustart des Servers wieder startet, zusätzlich einmal `sudo systemctl enable --now podman-restart.service` ausführen.
 
+**In einem LXC-Container (z. B. Proxmox)** fehlt oft `/dev/net/tun`. Dann bricht der Build mit `slirp4netns failed: open("/dev/net/tun")` ab. In diesem Fall am einfachsten Variante B (fertige Programmdatei mit systemd) verwenden.
+
 Hinter einem Reverse-Proxy (Zoraxy, Caddy, nginx …) einfach auf Port 8080 weiterleiten.
 
 ### Variante B: Fertige Programmdatei
