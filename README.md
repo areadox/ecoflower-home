@@ -113,7 +113,7 @@ Die Backup-Reserve muss laut Gerät mindestens 3 % über der Entladegrenze liege
 - Weboberfläche: reines HTML/CSS/JavaScript, in die Programmdatei eingebettet, kein Build-Schritt nötig
 - Die gesamte Anwendung ist eine einzige Datei; alle Daten liegen in einer SQLite-Datei
 - API-Signatur: HMAC-SHA256 nach EcoFlow-Dokumentation
-- Releases: Ein Tag `v*` startet den GitHub-Actions-Workflow, der die Programmdateien baut und das Release anlegt
+- Releases: Jeder Push auf `main` startet den GitHub-Actions-Workflow. Er baut die Programmdateien und legt das Release `v<Version aus Cargo.toml>` an oder aktualisiert es.
 
 ## Hinweis
 
