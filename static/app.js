@@ -70,6 +70,7 @@ async function route() {
     a.classList.toggle("active", (tab === "overview" && (name === "" || name === "device")) || tab === name);
   });
   clearInterval(route._timer);
+  clearInterval(route._meterTimer);
   await guarded(async () => {
     await loadBase();
     await (routes[name] || renderOverview)(decodeURIComponent(arg || ""));
@@ -90,9 +91,18 @@ async function renderOverview() {
   if (!devs.length) {
     html += `<p class="muted">Noch keine Geräte. Klicken Sie auf „Geräte von EcoFlow abrufen“.</p>`;
   }
+  html += `<div id="meter">${meterCard(cache.status.meter)}</div>`;
   html += `<div id="systems">${systemsHtml()}</div>`;
   $app.innerHTML = html;
   bindSystemControls();
+  // Zähler im Sekundentakt aktualisieren
+  route._meterTimer = setInterval(async () => {
+    try {
+      const m = await api("/meter");
+      const el = document.getElementById("meter");
+      if (el) el.innerHTML = meterCard(m); else clearInterval(route._meterTimer);
+    } catch { /* nächster Versuch */ }
+  }, 3000);
 
   document.getElementById("sync").onclick = () => guarded(async () => {
     const r = await api("/devices/sync", { method: "POST" });
@@ -112,6 +122,24 @@ async function renderOverview() {
     const el = document.getElementById("systems");
     if (el) { el.innerHTML = systemsHtml(); bindSystemControls(); }
   }), 15000);
+}
+
+function meterCard(m) {
+  if (!m || !m.configured) return "";
+  if (!m.ok && m.power_w == null) {
+    return `<div class="card meter"><h3><span>Stromzähler</span><span class="badge err">nicht erreichbar</span></h3>
+      <div class="muted">${esc(m.error || "")} · <a href="#/settings" style="color:var(--accent)">Einstellungen</a></div></div>`;
+  }
+  const p = m.power_w ?? 0;
+  const dir = p > 20 ? { cls: "act-discharge", text: "Bezug aus dem Netz" } : p < -20 ? { cls: "act-charge", text: "Einspeisung ins Netz" } : { cls: "act-idle", text: "ausgeglichen" };
+  const phases = (m.phases || []).map((v, i) => `<dt>L${i + 1}</dt><dd>${fmtNum(v, " W")}</dd>`).join("");
+  return `<div class="card meter">
+    <h3><span>Stromzähler ${m.model ? `<span class="muted">${esc(m.model)}</span>` : ""}</span>
+      <span>${m.ok ? "" : `<span class="badge err" title="${esc(m.error || "")}">veraltet</span> `}<span class="muted">${fmtTime(m.ts)}</span></span></h3>
+    <div class="row" style="align-items:center">
+      <div><div class="soc">${fmtNum(Math.abs(p), " W")}</div><span class="act ${dir.cls}">${dir.text}</span></div>
+      <dl class="kv">${phases}</dl>
+    </div></div>`;
 }
 
 // Haupt- vor Nebengeräten, dann nach Name
@@ -567,6 +595,23 @@ async function renderSettings() {
     </div>
 
     <div class="card" style="margin-top:16px">
+      <h3>Stromzähler (Shelly Pro 3EM)</h3>
+      <div class="muted">Wird direkt im Heimnetz abgefragt – schneller als über die EcoFlow-Cloud. Grundlage für spätere Regelungen.</div>
+      <div class="row">
+        <div><label>IP-Adresse oder Name (leer = aus)</label><input id="m-host" value="${esc(s.shelly_host)}" placeholder="192.168.1.50"></div>
+        <div><label>Passwort ${s.shelly_password_set ? '<span class="badge ok">gespeichert</span>' : '<span class="muted">(nur falls im Shelly eingeschaltet)</span>'}</label>
+          <input id="m-pw" type="password" placeholder="${s.shelly_password_set ? "unverändert lassen" : "kein Passwort"}"></div>
+        <div><label>Abfrage alle (Sekunden)</label><input id="m-int" type="number" min="1" max="60" value="${s.shelly_interval}"></div>
+      </div>
+      ${s.shelly_password_set ? `<label class="checkbox" style="margin-top:8px"><input type="checkbox" id="m-pw-del"> gespeichertes Passwort löschen</label>` : ""}
+      <div class="row" style="margin-top:12px">
+        <button class="secondary" id="m-test">Verbindung testen</button>
+        <button id="m-save">Speichern</button>
+      </div>
+      <div id="m-result" style="margin-top:10px"></div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
       <h3>Update</h3>
       <div id="upd">Wird geladen …</div>
     </div>
@@ -577,6 +622,28 @@ async function renderSettings() {
       <div style="margin-top:12px"><a class="btn" href="/api/export" download style="display:inline-block;text-decoration:none">Daten herunterladen</a></div>
     </div>`;
   renderUpdate(await api("/update"));
+
+  document.getElementById("m-test").onclick = () => guarded(async () => {
+    const out = document.getElementById("m-result");
+    out.innerHTML = `<span class="muted">Verbinde …</span>`;
+    try {
+      const r = await api("/meter/test", { method: "POST", body: { host: document.getElementById("m-host").value, password: document.getElementById("m-pw").value } });
+      out.innerHTML = `<span class="badge ok">Verbindung ok</span> ${esc(r.model || "")} · aktuell <b>${fmtNum(r.power_w, " W")}</b>` +
+        (r.phases?.length ? ` <span class="muted">(${r.phases.map((v, i) => `L${i + 1}: ${fmtNum(v, " W")}`).join(", ")})</span>` : "");
+    } catch (e) {
+      out.innerHTML = `<span class="badge err">Fehler</span> ${esc(e.message)}`;
+    }
+  });
+  document.getElementById("m-save").onclick = () => guarded(async () => {
+    const del = document.getElementById("m-pw-del");
+    await api("/settings", { method: "POST", body: {
+      shelly_host: document.getElementById("m-host").value,
+      shelly_password: del && del.checked ? "-" : document.getElementById("m-pw").value,
+      shelly_interval: Number(document.getElementById("m-int").value) || 2,
+    }});
+    toast("Stromzähler gespeichert");
+    route();
+  });
   document.getElementById("s-save").onclick = () => guarded(async () => {
     await api("/settings", { method: "POST", body: {
       access_key: document.getElementById("s-ak").value,

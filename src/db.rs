@@ -105,6 +105,13 @@ fn migrate(conn: &Connection) -> Result<()> {
             group_key TEXT UNIQUE
         );",
     )?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS meter_samples (
+            ts      INTEGER NOT NULL,
+            power_w REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_meter_ts ON meter_samples(ts);",
+    )?;
     let has_col = |col: &str| -> Result<bool> {
         let mut stmt = conn.prepare("SELECT 1 FROM pragma_table_info('devices') WHERE name = ?1")?;
         Ok(stmt.exists([col])?)
@@ -115,8 +122,31 @@ fn migrate(conn: &Connection) -> Result<()> {
              ALTER TABLE devices ADD COLUMN system_manual INTEGER NOT NULL DEFAULT 0;",
         )?;
     }
+    // 0.0.6: Feldnamen wie bei der Backup-Reserve („cfg“ + Quota-Name)
+    conn.execute_batch(
+        r#"UPDATE commands SET template = replace(template, '"cfgMinDsgSoc"', '"cfgCmsMinDsgSoc"')
+             WHERE name = 'STREAM Entladegrenze';
+           UPDATE commands SET template = replace(template, '"cfgMaxChgSoc"', '"cfgCmsMaxChgSoc"')
+             WHERE name = 'STREAM Ladegrenze';"#,
+    )?;
+    let has_feed: bool = conn
+        .query_row("SELECT 1 FROM commands WHERE name = 'STREAM Einspeiselimit'", [], |_| Ok(true))
+        .optional()?
+        .unwrap_or(false);
+    let any: i64 = conn.query_row("SELECT COUNT(*) FROM commands", [], |r| r.get(0))?;
+    if !has_feed && any > 0 {
+        conn.execute(
+            "INSERT INTO commands (name, description, template) VALUES ('STREAM Einspeiselimit', ?1, ?2)",
+            params![
+                EINSPEISE_DESC,
+                r#"{"sn":"{{sn}}","cmdId":17,"cmdFunc":254,"dirDest":1,"dirSrc":1,"dest":2,"needAck":true,"params":{"cfgFeedGridModePowLimit":{{value}}}}"#
+            ],
+        )?;
+    }
     Ok(())
 }
+
+const EINSPEISE_DESC: &str = "Maximale Abgabeleistung ins Hausnetz in W – ungetestet (Quota: feedGridModePowLimit)";
 
 /// Vorlagen für STREAM-Geräte (Format wie bei evcc / hassio-ecoflow-cloud).
 fn seed_commands(conn: &Connection) -> Result<()> {
@@ -130,11 +160,12 @@ fn seed_commands(conn: &Connection) -> Result<()> {
         )
     };
     let seeds = [
-        ("STREAM Entladegrenze", "Untere Entladegrenze in % (Quota: cmsMinDsgSoc)", base("cfgMinDsgSoc")),
-        ("STREAM Ladegrenze", "Obere Ladegrenze in % (Quota: cmsMaxChgSoc)", base("cfgMaxChgSoc")),
+        ("STREAM Entladegrenze", "Untere Entladegrenze in % (Quota: cmsMinDsgSoc)", base("cfgCmsMinDsgSoc")),
+        ("STREAM Ladegrenze", "Obere Ladegrenze in % (Quota: cmsMaxChgSoc)", base("cfgCmsMaxChgSoc")),
         ("STREAM Backup-Reserve", "Backup-Reserve in %, muss 3 % über der Entladegrenze liegen (Quota: backupReverseSoc)", base("cfgBackupReverseSoc")),
         ("STREAM AC-Ausgang 1", "true = an, false = aus (Quota: relay2Onoff)", base("cfgRelay2Onoff")),
         ("STREAM AC-Ausgang 2", "true = an, false = aus (Quota: relay3Onoff)", base("cfgRelay3Onoff")),
+        ("STREAM Einspeiselimit", EINSPEISE_DESC, base("cfgFeedGridModePowLimit")),
     ];
     for (name, desc, tpl) in seeds {
         conn.execute(
@@ -578,5 +609,6 @@ pub fn cleanup(conn: &Connection, retention_days: u64) -> Result<()> {
     let cutoff = chrono::Utc::now().timestamp() - (retention_days as i64) * 86_400;
     conn.execute("DELETE FROM samples WHERE ts < ?1", [cutoff])?;
     conn.execute("DELETE FROM events WHERE ts < ?1", [cutoff])?;
+    conn.execute("DELETE FROM meter_samples WHERE ts < ?1", [cutoff])?;
     Ok(())
 }

@@ -20,6 +20,7 @@ Ziel: **jedem Speicher eigene Regeln geben**, z. B. eigene Entladegrenzen pro Ge
   - **Schwellwert:** schaltet beim Erreichen eines Ladestands, mit Hysterese, z. B. „bei ≤ 20 % AC-Ausgang aus, bei ≥ 30 % wieder an“
   - optional mit **Zeitfenster** (auch über Mitternacht, z. B. 22:00–06:00)
 - **Testmodus** (Standard): Regeln protokollieren nur, was sie tun würden, und senden nichts
+- **Stromzähler Shelly Pro 3EM:** direkt im Heimnetz abgefragt (IP-Adresse und optionales Passwort in den Einstellungen, mit Verbindungstest), Live-Anzeige von Bezug/Einspeisung und Phasen in der Übersicht, Verlauf in der Datenbank
 - **Ereignisprotokoll** aller Aktionen und Fehler
 - **Updates per Klick** in der Weboberfläche (GitHub-Release, mit Prüfsummenkontrolle)
 - **Daten-Download** zur Fehlersuche (alle Werte, letzte MQTT-Nachrichten, Regeln, Ereignisse – ohne Secret Key)
@@ -134,7 +135,8 @@ Erkenntnisse aus dem Betrieb mit Ultra X (Hauptgerät), Ultra und zwei AC Pro:
 - **HTTP** (`quota/all`) liefert pro Gerät nur 15 Werte. Fast alle davon sind **Systemwerte**, die nur das Hauptgerät sinnvoll meldet (`cmsBattSoc`, `powGetPvSum`, `powGetSysGrid`, `powGetSysLoad`, `powGetBpCms`). Nebengeräte melden dort 0. **Pro Gerät** sind nur `gridConnectionPower` sowie die AC-Ausgänge `relay2Onoff`/`relay3Onoff` dabei.
 - **Haupt- oder Nebengerät:** ohne MQTT daran erkannt, dass nur das Hauptgerät einen `cmsBattSoc` über 0 meldet
 - **Ladestand pro Speicher** (`bmsBattSoc`/`soc`) kommt nur über **MQTT**
-- **Systemzugehörigkeit** (`systemGroupId`) und Rolle (`distributedDeviceStatus`: 1 = Haupt, 2 = Neben) kommen über MQTT
+- **Systemzugehörigkeit** (`systemGroupId`) und Rolle kommen über MQTT. Bei Nebengeräten steht `distributedDeviceStatus` oft auf `ELECTION`; verlässlich ist `seriesConnectDeviceStatus` (`MASTER`/`SLAVE`).
+- **Einzelsystem ohne Zähler** (z. B. ein AC Pro allein): Liegt die Backup-Reserve über dem Ladestand, lädt das Gerät mit voller Leistung (`powSysAcInMax`, beim AC Pro ca. 1050 W) **aus dem Netz** bis zur Reserve. Als Hausverbrauch nimmt es ohne Zähler einen festen Wert an (`emsSetRatedPower`, z. B. 600 W).
 - **Backup-Reserve, Grenzen und Betriebsmodus** gelten pro EcoFlow-System. Ein Speicher, der eigene Werte braucht, muss in der EcoFlow-App in ein eigenes System. Ein Smart Meter (z. B. Shelly Pro 3EM) lässt sich dabei nur einem System zuordnen.
 - **Zustand pro Speicher** (lädt/entlädt/Standby) ebenfalls nur über MQTT: `bmsChgDsgState` (0 = Standby, 1 = Entladen, 2 = Laden), ersatzweise der Akkustrom `amp` × `vol`. Ohne MQTT ist der Zustand nur beim Hauptgerät bekannt (Vorzeichen von `powGetBpCms`, positiv = Laden), alle anderen zeigen „unbekannt“.
 - **Backup-Reserve** gilt immer für das ganze System. Wird sie an einem Gerät gesetzt, übernehmen alle Geräte den Wert.
@@ -150,11 +152,14 @@ Befehle sind JSON-Vorlagen mit den Platzhaltern `{{sn}}` (Seriennummer) und `{{v
 
 | Vorlage                | Parameter              | Rücklese-Quota      |
 |------------------------|------------------------|---------------------|
-| STREAM Entladegrenze   | `cfgMinDsgSoc`         | `cmsMinDsgSoc`      |
-| STREAM Ladegrenze      | `cfgMaxChgSoc`         | `cmsMaxChgSoc`      |
+| STREAM Entladegrenze   | `cfgCmsMinDsgSoc`      | `cmsMinDsgSoc`      |
+| STREAM Ladegrenze      | `cfgCmsMaxChgSoc`      | `cmsMaxChgSoc`      |
 | STREAM Backup-Reserve  | `cfgBackupReverseSoc`  | `backupReverseSoc`  |
 | STREAM AC-Ausgang 1    | `cfgRelay2Onoff`       | `relay2Onoff`       |
 | STREAM AC-Ausgang 2    | `cfgRelay3Onoff`       | `relay3Onoff`       |
+| STREAM Einspeiselimit  | `cfgFeedGridModePowLimit` | `feedGridModePowLimit` |
+
+Bestätigt funktionieren Backup-Reserve und AC-Ausgänge. Die Feldnamen folgen dem Muster „`cfg` + Quota-Name“; Entladegrenze, Ladegrenze und Einspeiselimit sind danach gebildet, aber noch nicht an echten Geräten bestätigt – die Regel „Wert halten“ zeigt, ob ein Gerät sie übernimmt.
 
 Die Backup-Reserve muss laut Gerät mindestens 3 % über der Entladegrenze liegen. Weitere Vorlagen lassen sich unter **Befehle** anlegen.
 

@@ -61,17 +61,29 @@ pub fn pick_soc(quotas: &Map<String, Value>, override_key: &str) -> Option<f64> 
 /// Haupt- oder Nebengerät? Aus MQTT kommt `distributedDeviceStatus`; ohne MQTT
 /// gilt: Nur das Hauptgerät meldet einen Systemladestand (`cmsBattSoc`) über 0.
 pub fn pick_role(quotas: &Map<String, Value>) -> String {
+    // Beide Felder ansehen: `distributedDeviceStatus` steht bei Nebengeräten oft auf
+    // „ELECTION“, während `seriesConnectDeviceStatus` korrekt „SLAVE“ meldet.
+    let mut other = String::new();
     for k in ROLE_KEYS {
-        match quotas.get(k) {
-            Some(Value::String(s)) if !s.is_empty() => return s.to_uppercase(),
-            // MQTT liefert die Rolle teils als Zahl: 0 = Wahl läuft, 1 = Haupt, 2 = Neben
+        let role = match quotas.get(k) {
+            Some(Value::String(s)) => s.trim().to_uppercase(),
+            // als Zahl: 0 = Wahl läuft, 1 = Haupt, 2 = Neben
             Some(v) => match as_f64(v).map(|n| n as i64) {
-                Some(1) => return "MASTER".into(),
-                Some(2) => return "SLAVE".into(),
-                _ => {}
+                Some(1) => "MASTER".into(),
+                Some(2) => "SLAVE".into(),
+                _ => String::new(),
             },
-            None => {}
+            None => String::new(),
+        };
+        if role == "MASTER" || role == "SLAVE" {
+            return role;
         }
+        if other.is_empty() {
+            other = role;
+        }
+    }
+    if !other.is_empty() {
+        return other;
     }
     match quotas.get("cmsBattSoc").and_then(as_f64) {
         Some(v) if v > 0.0 => "MASTER".into(),
@@ -513,5 +525,7 @@ mod tests {
         assert_eq!(pick_role(&haupt), "MASTER");
         let zahl: Map<String, Value> = serde_json::from_value(json!({"distributedDeviceStatus": 2, "cmsBattSoc": 50})).unwrap();
         assert_eq!(pick_role(&zahl), "SLAVE");
+        let wahl: Map<String, Value> = serde_json::from_value(json!({"distributedDeviceStatus": "ELECTION", "seriesConnectDeviceStatus": "SLAVE"})).unwrap();
+        assert_eq!(pick_role(&wahl), "SLAVE");
     }
 }

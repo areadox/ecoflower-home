@@ -52,6 +52,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/rules/{id}", delete(delete_rule))
         .route("/events", get(list_events))
         .route("/export", get(export))
+        .route("/meter", get(meter_status))
+        .route("/meter/test", post(meter_test))
+        .route("/meter/history", get(meter_history))
         .route("/update", get(update_info))
         .route("/update/check", post(update_check))
         .route("/update/install", post(update_install));
@@ -114,6 +117,7 @@ async fn status(State(s): State<Arc<AppState>>) -> AppResult<Json<Value>> {
         "poll_seconds": st.poll_seconds,
         "mqtt": *s.mqtt.lock().unwrap(),
         "update": *s.update.lock().unwrap(),
+        "meter": *s.meter.lock().unwrap(),
     })))
 }
 
@@ -128,6 +132,9 @@ async fn get_settings(State(s): State<Arc<AppState>>) -> AppResult<Json<Value>> 
         "dry_run": st.dry_run,
         "retention_days": st.retention_days,
         "mqtt_enabled": st.mqtt_enabled,
+        "shelly_host": db::get_setting(&conn, "shelly_host")?.unwrap_or_default(),
+        "shelly_password_set": !db::get_setting(&conn, "shelly_password")?.unwrap_or_default().is_empty(),
+        "shelly_interval": crate::meter::load_config(&conn).interval_secs,
     })))
 }
 
@@ -140,6 +147,10 @@ struct SettingsInput {
     dry_run: Option<bool>,
     retention_days: Option<u64>,
     mqtt_enabled: Option<bool>,
+    shelly_host: Option<String>,
+    /// leer = unverändert, "-" = Passwort löschen
+    shelly_password: Option<String>,
+    shelly_interval: Option<u64>,
 }
 
 async fn save_settings(State(s): State<Arc<AppState>>, Json(i): Json<SettingsInput>) -> AppResult<Json<Value>> {
@@ -167,7 +178,19 @@ async fn save_settings(State(s): State<Arc<AppState>>, Json(i): Json<SettingsInp
         if let Some(v) = i.mqtt_enabled {
             db::set_setting(&conn, "mqtt_enabled", if v { "1" } else { "0" })?;
         }
+        if let Some(v) = i.shelly_host {
+            db::set_setting(&conn, "shelly_host", v.trim())?;
+        }
+        match i.shelly_password.as_deref() {
+            Some("-") => db::set_setting(&conn, "shelly_password", "")?,
+            Some(v) if !v.is_empty() => db::set_setting(&conn, "shelly_password", v)?,
+            _ => {}
+        }
+        if let Some(v) = i.shelly_interval {
+            db::set_setting(&conn, "shelly_interval", &v.clamp(1, 60).to_string())?;
+        }
     }
+    s.meter_restart.notify_one();
     s.poll_now.notify_one();
     s.mqtt_restart.notify_one();
     Ok(Json(json!({ "ok": true })))
@@ -462,6 +485,7 @@ async fn export(State(s): State<Arc<AppState>>) -> AppResult<Response> {
     let mqtt = s.mqtt.lock().unwrap().clone();
     let mqtt_raw = s.mqtt_raw.lock().unwrap().clone();
     let update = s.update.lock().unwrap().clone();
+    let meter = s.meter.lock().unwrap().clone();
     let body = {
         let conn = s.db.lock().unwrap();
         let st = db::load_settings(&conn)?;
@@ -496,6 +520,8 @@ async fn export(State(s): State<Arc<AppState>>) -> AppResult<Response> {
                 "retention_days": st.retention_days,
             },
             "mqtt": mqtt,
+            "meter": meter,
+            "meter_host": db::get_setting(&conn, "shelly_host")?.unwrap_or_default(),
             "mqtt_last_messages": mqtt_raw,
             "update": update,
             "devices": devices,
@@ -516,4 +542,41 @@ async fn export(State(s): State<Arc<AppState>>) -> AppResult<Response> {
         text,
     )
         .into_response())
+}
+
+// ---------- Stromzähler ----------
+
+async fn meter_status(State(s): State<Arc<AppState>>) -> AppResult<Json<Value>> {
+    Ok(Json(json!(*s.meter.lock().unwrap())))
+}
+
+#[derive(Deserialize)]
+struct MeterTestInput {
+    host: String,
+    #[serde(default)]
+    password: String,
+}
+
+/// Verbindung testen, ohne zu speichern. Leeres Passwort = gespeichertes verwenden.
+async fn meter_test(State(s): State<Arc<AppState>>, Json(i): Json<MeterTestInput>) -> AppResult<Json<Value>> {
+    let mut cfg = {
+        let conn = s.db.lock().unwrap();
+        crate::meter::load_config(&conn)
+    };
+    cfg.host = i.host.trim().to_string();
+    if !i.password.is_empty() {
+        cfg.password = i.password;
+    }
+    let st = crate::meter::read_once(&cfg).await.map_err(|e| AppError(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    Ok(Json(json!(st)))
+}
+
+async fn meter_history(State(s): State<Arc<AppState>>, Query(q): Query<HistoryQuery>) -> AppResult<Json<Value>> {
+    let since = chrono::Utc::now().timestamp() - q.hours.unwrap_or(24).clamp(1, 24 * 90) * 3600;
+    let conn = s.db.lock().unwrap();
+    let mut stmt = conn.prepare("SELECT ts, power_w FROM meter_samples WHERE ts >= ?1 ORDER BY ts")?;
+    let rows: Vec<Value> = stmt
+        .query_map([since], |r| Ok(json!({ "ts": r.get::<_, i64>(0)?, "power_w": r.get::<_, Option<f64>>(1)? })))?
+        .collect::<Result<_, _>>()?;
+    Ok(Json(json!(rows)))
 }

@@ -1,9 +1,10 @@
-### Neu in 0.0.5
-- **Systemansicht:** Die Übersicht zeigt jedes EcoFlow-System mit seinen Systemwerten (Gesamtladestand, Solar, Netz, Hausverbrauch, Batterieleistung, Betriebsmodus, Grenzen, Backup-Reserve) und darunter seine Geräte, Hauptgerät zuerst
-- **Automatische Zuordnung** der Geräte zu Systemen über die `systemGroupId` aus den MQTT-Live-Daten; neue Systeme werden selbst angelegt
-- **Zuordnung von Hand** auf jeder Gerätekarte und auf der Geräteseite (automatisch / System wählen / kein System); „Neues System“, Umbenennen und Entfernen in der Übersicht
-- Rolle Haupt/Neben wird jetzt auch erkannt, wenn EcoFlow sie als Zahl meldet
-- Bestehende Datenbanken werden beim Start automatisch erweitert
+### Neu in 0.0.6
+- **Stromzähler Shelly Pro 3EM:** unter *Einstellungen* IP-Adresse und (falls im Shelly eingeschaltet) Passwort eintragen, mit **Verbindungstest**. Abfrage direkt im Heimnetz, Standard alle 2 Sekunden – deutlich schneller als über die EcoFlow-Cloud.
+- **Live-Anzeige in der Übersicht:** Bezug bzw. Einspeisung und die drei Phasen, aktualisiert alle 3 Sekunden; Verlauf wird alle 30 Sekunden gespeichert
+- **Rolle Haupt/Neben korrigiert:** Nebengeräte wurden als „ELECTION“ angezeigt, jetzt wird `seriesConnectDeviceStatus` mit ausgewertet
+- **Befehlsvorlagen korrigiert:** Entlade- und Ladegrenze verwenden jetzt `cfgCmsMinDsgSoc`/`cfgCmsMaxChgSoc` (gleiches Muster wie die funktionierende Backup-Reserve); bestehende Vorlagen werden automatisch angepasst
+- **Neue Vorlage „STREAM Einspeiselimit“** (`cfgFeedGridModePowLimit`) zum Testen
+- Stromzähler im Daten-Download (ohne Passwort)
 
 ### Update
 In der Weboberfläche unter *Einstellungen → Update*.
