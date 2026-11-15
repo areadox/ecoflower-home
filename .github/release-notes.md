@@ -1,8 +1,11 @@
-### Neu in 0.0.7
-- **Shelly 3EM der ersten Generation** (`SHEM-3`) wird jetzt unterstützt. Bisher ging nur der Shelly Pro 3EM, deshalb schlug die Verbindung zum 3EM fehl.
-- Die Generation wird automatisch über `/shelly` erkannt; angezeigt wird z. B. „SHEM-3 (Gen1)“
-- Anmeldung beim Shelly 3EM per Benutzer/Passwort (Standardbenutzer `admin`, sonst `benutzer:passwort` ins Passwortfeld)
-- README: Tabelle zu den unterstützten Shelly-Zählern
+### Neu in 0.0.8
+- **Regler für einen Einzelspeicher** (neuer Menüpunkt *Regler*) – gedacht für einen Speicher in einem eigenen EcoFlow-System ohne Zähler, z. B. den AC Pro Bad:
+  - **gibt ab**, was das Haus braucht: oberhalb der Mindestreserve (Standard 60 %) wird die Abgabe über das Einspeiselimit nachgeführt, bis der Shelly ca. +20 W zeigt (max. 600 W)
+  - **lädt nur aus Überschuss**: ab 800 W Einspeisung (60 s lang) wird das Laden gestartet; es stoppt bei Netzbezug oder wenn das Hauptsystem dafür entladen müsste
+  - **kein Nachladen aus dem Netz**: unter der Mindestreserve wird die Reserve auf den aktuellen Ladestand gesetzt
+  - ohne Zählerwerte wird die Abgabe aus Sicherheitsgründen auf 0 W gesetzt
+  - alle Schwellen einstellbar, Live-Status und die letzten Aktionen auf der Seite, Testmodus wird beachtet
+- Regler-Einstellungen und -Status im Daten-Download
 
 ### Update
 In der Weboberfläche unter *Einstellungen → Update*.

@@ -5,6 +5,7 @@ mod ecoflow;
 mod engine;
 mod meter;
 mod mqtt;
+mod regulator;
 mod update;
 mod web;
 
@@ -21,6 +22,8 @@ pub struct AppState {
     pub update: Mutex<update::UpdateInfo>,
     pub meter: Mutex<meter::MeterStatus>,
     pub meter_restart: Notify,
+    pub regulator: Mutex<regulator::RegStatus>,
+    pub regulator_restart: Notify,
     pub web_user: String,
     pub web_password: Option<String>,
 }
@@ -48,6 +51,8 @@ async fn main() -> anyhow::Result<()> {
         update: Mutex::new(update::UpdateInfo { current: update::CURRENT.into(), ..Default::default() }),
         meter: Mutex::new(meter::MeterStatus::default()),
         meter_restart: Notify::new(),
+        regulator: Mutex::new(regulator::RegStatus::default()),
+        regulator_restart: Notify::new(),
         web_user,
         web_password,
     });
@@ -59,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(engine::run_poller(state.clone()));
     tokio::spawn(mqtt::run(state.clone()));
     tokio::spawn(meter::run(state.clone()));
+    tokio::spawn(regulator::run(state.clone()));
     {
         // Alle 6 Stunden nach einer neuen Version sehen
         let state = state.clone();

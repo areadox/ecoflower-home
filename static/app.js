@@ -57,6 +57,7 @@ async function loadBase() {
 const routes = {
   "": renderOverview,
   device: renderDevice,
+  regulator: renderRegulator,
   rules: renderRules,
   commands: renderCommands,
   events: renderEvents,
@@ -386,6 +387,92 @@ function eventsTable(events) {
   const name = sn => { const d = cache.devices.find(x => x.sn === sn); return d ? devName(d) : sn; };
   return `<table><tr><th>Zeit</th><th>Gerät</th><th>Meldung</th></tr>` +
     events.map(e => `<tr class="level-${esc(e.level)}"><td style="white-space:nowrap">${fmtTime(e.ts)}</td><td>${esc(name(e.sn))}</td><td>${esc(e.message)}</td></tr>`).join("") + `</table>`;
+}
+
+// ---------- Regler ----------
+
+async function renderRegulator() {
+  const { config: c } = await api("/regulator");
+  const devOpts = (sel, empty) => `<option value="">${empty}</option>` + cache.devices.map(d =>
+    `<option value="${esc(d.sn)}" ${d.sn === sel ? "selected" : ""}>${esc(devName(d))}${d.role === "MASTER" ? " (Haupt)" : ""}</option>`).join("");
+  const field = (id, label, val, unit, hint = "") =>
+    `<div><label>${label} ${hint ? `<span class="muted">${hint}</span>` : ""}</label>
+      <div class="unit-input"><input id="${id}" type="number" value="${val}"><span>${unit}</span></div></div>`;
+  $app.innerHTML = `
+    <h1>Regler für einen Einzelspeicher</h1>
+    <div class="notice">Für einen Speicher in einem <b>eigenen EcoFlow-System ohne Zähler</b> (z. B. AC Pro Bad). Der Regler misst mit dem Shelly und
+      <b>gibt</b> oberhalb der Mindestreserve so viel <b>ab</b>, wie das Haus braucht (über das Einspeiselimit), und <b>lädt</b> nur bei Überschuss
+      (über die Backup-Reserve). Er stoppt das Laden, sobald dafür Netzstrom oder Strom aus dem Hauptsystem nötig wäre.
+      ${cache.status.dry_run ? "<br><b>Testmodus ist an:</b> Der Regler zeigt nur, was er tun würde. Umschalten unter Einstellungen." : ""}
+      ${cache.status.meter?.configured ? "" : `<br><b>Kein Stromzähler eingerichtet</b> – bitte zuerst unter <a href="#/settings" style="color:var(--accent)">Einstellungen</a> den Shelly eintragen.`}</div>
+
+    <div class="grid" style="grid-template-columns: 1fr 1fr">
+      <div class="card">
+        <h3>Einstellungen</h3>
+        <label class="checkbox"><input type="checkbox" id="r-en" ${c.enabled ? "checked" : ""}> Regler eingeschaltet</label>
+        <label>Geregelter Speicher</label><select id="r-sn">${devOpts(c.sn, "– bitte wählen –")}</select>
+        <label>Hauptgerät des anderen Systems <span class="muted">(optional: stoppt das Laden, wenn es dafür entlädt)</span></label>
+        <select id="r-main">${devOpts(c.main_sn, "– keins –")}</select>
+        <div class="row">
+          ${field("r-res", "Mindestreserve", c.reserve, "%")}
+          ${field("r-until", "Laden bis", c.charge_until, "%")}
+        </div>
+        <div class="row">
+          ${field("r-max", "Max. Abgabe", c.max_out, "W")}
+          ${field("r-target", "Ziel am Zähler", c.target_grid, "W", "(+ = etwas Bezug)")}
+        </div>
+        <div class="row">
+          ${field("r-start", "Laden ab Einspeisung", c.start_export, "W")}
+          ${field("r-stop", "Laden stoppen ab Bezug", c.stop_import, "W")}
+        </div>
+        <div class="row">
+          ${field("r-delay", "Verzögerung", c.delay_secs, "s")}
+          ${field("r-int", "Regeltakt", c.interval_secs, "s")}
+        </div>
+        <div class="row" style="margin-top:14px"><button id="r-save">Speichern</button></div>
+      </div>
+      <div class="card">
+        <h3>Status</h3>
+        <div id="reg-status" class="muted">Wird geladen …</div>
+      </div>
+    </div>`;
+
+  const v = id => document.getElementById(id).value;
+  document.getElementById("r-save").onclick = () => guarded(async () => {
+    await api("/regulator", { method: "POST", body: {
+      enabled: document.getElementById("r-en").checked, sn: v("r-sn"), main_sn: v("r-main"),
+      reserve: Number(v("r-res")), charge_until: Number(v("r-until")), max_out: Number(v("r-max")),
+      target_grid: Number(v("r-target")), start_export: Number(v("r-start")), stop_import: Number(v("r-stop")),
+      delay_secs: Number(v("r-delay")), interval_secs: Number(v("r-int")),
+    }});
+    toast("Regler gespeichert");
+    setTimeout(drawStatus, 1500);
+  });
+
+  const drawStatus = async () => {
+    const el = document.getElementById("reg-status");
+    if (!el) { clearInterval(route._timer); return; }
+    const { status: s } = await api("/regulator");
+    const i = s.inputs || {};
+    const mode = !s.running ? `<span class="act act-unknown">aus</span>`
+      : s.waiting ? `<span class="act act-unknown" title="${esc(s.waiting)}">wartet</span>`
+      : s.mode === "charge" ? `<span class="act act-charge">▲ lädt aus Überschuss</span>`
+      : (i.batt_w ?? 0) < -10 ? `<span class="act act-discharge">▼ versorgt das Haus</span>`
+      : `<span class="act act-idle">● bereit</span>`;
+    el.innerHTML = `<div style="margin-bottom:10px">${mode} ${s.waiting ? `<span class="muted">${esc(s.waiting)}</span>` : ""}</div>
+      ${s.inputs ? `<dl class="kv">
+        <dt>Ladestand</dt><dd>${fmtNum(i.soc, " %")}</dd>
+        <dt>Akku (+ lädt / − gibt ab)</dt><dd>${fmtNum(i.batt_w, " W")}</dd>
+        <dt>Zähler (+ Bezug / − Einspeisung)</dt><dd>${fmtNum(i.grid_w, " W")}</dd>
+        <dt>Abgabe-Limit am Gerät</dt><dd>${fmtNum(i.limit_now, " W")}</dd>
+        <dt>Backup-Reserve am Gerät</dt><dd>${fmtNum(i.reserve_now, " %")}</dd>
+        <dt>Hauptsystem-Akku</dt><dd>${fmtNum(i.main_batt_w, " W")}</dd>
+        <dt>Letzter Takt</dt><dd>${fmtTime(s.last_tick)}</dd></dl>` : ""}
+      <h2 style="font-size:14px">Letzte Aktionen</h2>
+      ${(s.history || []).length ? `<table>${s.history.map(([ts, t]) => `<tr><td style="white-space:nowrap">${fmtTime(ts)}</td><td>${esc(t)}</td></tr>`).join("")}</table>` : `<p class="muted">noch keine</p>`}`;
+  };
+  await drawStatus();
+  route._timer = setInterval(() => guarded(drawStatus), 3000);
 }
 
 // ---------- Regeln ----------

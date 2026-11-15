@@ -19,6 +19,7 @@ Ziel: **jedem Speicher eigene Regeln geben**, z. B. eigene Entladegrenzen pro Ge
   - **Wert halten:** sendet einen Befehl, bis das Gerät den Sollwert zurückmeldet, z. B. „Küche: Entladegrenze 40 %“. Wird der Wert nicht übernommen, erscheint eine Warnung und das Programm versucht es nur noch stündlich.
   - **Schwellwert:** schaltet beim Erreichen eines Ladestands, mit Hysterese, z. B. „bei ≤ 20 % AC-Ausgang aus, bei ≥ 30 % wieder an“
   - optional mit **Zeitfenster** (auch über Mitternacht, z. B. 22:00–06:00)
+- **Regler für einen Einzelspeicher** (z. B. AC Pro in einem eigenen System ohne Zähler): misst mit dem Shelly, gibt oberhalb einer Mindestreserve genau so viel ab, wie das Haus braucht, und lädt nur aus Überschuss – stoppt das Laden, sobald dafür Netzstrom oder Strom aus dem Hauptsystem nötig wäre (siehe unten)
 - **Testmodus** (Standard): Regeln protokollieren nur, was sie tun würden, und senden nichts
 - **Stromzähler Shelly 3EM (Gen1) und Shelly Pro 3EM (Gen2):** Generation wird automatisch erkannt, direkt im Heimnetz abgefragt (IP-Adresse und optionales Passwort in den Einstellungen, mit Verbindungstest), Live-Anzeige von Bezug/Einspeisung und Phasen in der Übersicht, Verlauf in der Datenbank
 - **Ereignisprotokoll** aller Aktionen und Fehler
@@ -159,7 +160,7 @@ Befehle sind JSON-Vorlagen mit den Platzhaltern `{{sn}}` (Seriennummer) und `{{v
 | STREAM AC-Ausgang 2    | `cfgRelay3Onoff`       | `relay3Onoff`       |
 | STREAM Einspeiselimit  | `cfgFeedGridModePowLimit` | `feedGridModePowLimit` |
 
-Bestätigt funktionieren Backup-Reserve und AC-Ausgänge. Die Feldnamen folgen dem Muster „`cfg` + Quota-Name“; Entladegrenze, Ladegrenze und Einspeiselimit sind danach gebildet, aber noch nicht an echten Geräten bestätigt – die Regel „Wert halten“ zeigt, ob ein Gerät sie übernimmt.
+Bestätigt funktionieren Backup-Reserve, AC-Ausgänge und das Einspeiselimit (Test: Limit 200 W → Gerät gibt 200 W ab). Die Feldnamen folgen dem Muster „`cfg` + Quota-Name“; Entladegrenze, Ladegrenze und Einspeiselimit sind danach gebildet, aber noch nicht an echten Geräten bestätigt – die Regel „Wert halten“ zeigt, ob ein Gerät sie übernimmt.
 
 Die Backup-Reserve muss laut Gerät mindestens 3 % über der Entladegrenze liegen. Weitere Vorlagen lassen sich unter **Befehle** anlegen.
 
@@ -187,3 +188,18 @@ MIT
 | Shelly Pro 3EM (Gen2+) | `"gen":2` | `/rpc/EM.GetStatus?id=0` → `total_act_power` (einphasiges Profil: `EM1.GetStatus`) | HTTP-Digest SHA-256, Benutzer `admin` |
 
 Positive Werte bedeuten Bezug aus dem Netz, negative Einspeisung.
+
+## Regler für einen Einzelspeicher
+
+Für einen Speicher, der in der EcoFlow-App ein **eigenes System ohne Zähler** bildet (z. B. damit er eine eigene Backup-Reserve bekommt). Ohne Zähler würde er nur einen festen Hausverbrauch annehmen und unter der Reserve mit voller Leistung aus dem Netz laden. Der Regler übernimmt mit dem Shelly die Messung:
+
+| Situation | Was der Regler tut | Befehl |
+|-----------|--------------------|--------|
+| Ladestand über der Mindestreserve | Abgabe so nachführen, dass der Zähler auf dem Zielwert (Standard +20 W) steht, höchstens „Max. Abgabe“ | Einspeiselimit (`cfgFeedGridModePowLimit`) |
+| Ladestand an/unter der Mindestreserve | Abgabe 0 W, Reserve auf min(Mindestreserve, Ladestand) – damit das Gerät **nicht aus dem Netz** nachlädt | Einspeiselimit, Backup-Reserve |
+| Einspeisung ≥ „Laden ab Einspeisung“ für die Verzögerungszeit | Laden starten (das Gerät lädt dann mit voller Leistung, AC Pro ca. 1050 W) | Backup-Reserve 100 % |
+| Beim Laden: Netzbezug ≥ „Laden stoppen ab Bezug“ oder Hauptsystem entlädt dafür | Laden stoppen | Backup-Reserve zurück |
+| „Laden bis“ erreicht | Laden stoppen | Backup-Reserve zurück |
+| Zähler liefert keine Werte | Abgabe 0 W (Sicherheit) | Einspeiselimit |
+
+Die Ladeleistung selbst lässt sich über die API nicht einstellen; deshalb startet der Regler das Laden erst bei ausreichend Überschuss. Der Regler beachtet den **Testmodus** – dort zeigt er unter „Letzte Aktionen“ nur, was er senden würde.

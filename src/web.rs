@@ -52,6 +52,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/rules/{id}", delete(delete_rule))
         .route("/events", get(list_events))
         .route("/export", get(export))
+        .route("/regulator", get(regulator_get).post(regulator_save))
         .route("/meter", get(meter_status))
         .route("/meter/test", post(meter_test))
         .route("/meter/history", get(meter_history))
@@ -486,6 +487,7 @@ async fn export(State(s): State<Arc<AppState>>) -> AppResult<Response> {
     let mqtt_raw = s.mqtt_raw.lock().unwrap().clone();
     let update = s.update.lock().unwrap().clone();
     let meter = s.meter.lock().unwrap().clone();
+    let regulator = s.regulator.lock().unwrap().clone();
     let body = {
         let conn = s.db.lock().unwrap();
         let st = db::load_settings(&conn)?;
@@ -521,6 +523,10 @@ async fn export(State(s): State<Arc<AppState>>) -> AppResult<Response> {
             },
             "mqtt": mqtt,
             "meter": meter,
+            "regulator": {
+                "config": crate::regulator::load_config(&conn),
+                "status": regulator,
+            },
             "meter_host": db::get_setting(&conn, "shelly_host")?.unwrap_or_default(),
             "mqtt_last_messages": mqtt_raw,
             "update": update,
@@ -579,4 +585,31 @@ async fn meter_history(State(s): State<Arc<AppState>>, Query(q): Query<HistoryQu
         .query_map([since], |r| Ok(json!({ "ts": r.get::<_, i64>(0)?, "power_w": r.get::<_, Option<f64>>(1)? })))?
         .collect::<Result<_, _>>()?;
     Ok(Json(json!(rows)))
+}
+
+// ---------- Regler ----------
+
+async fn regulator_get(State(s): State<Arc<AppState>>) -> AppResult<Json<Value>> {
+    let status = s.regulator.lock().unwrap().clone();
+    let conn = s.db.lock().unwrap();
+    Ok(Json(json!({ "config": crate::regulator::load_config(&conn), "status": status })))
+}
+
+async fn regulator_save(
+    State(s): State<Arc<AppState>>,
+    Json(c): Json<crate::regulator::RegConfig>,
+) -> AppResult<Json<Value>> {
+    if c.enabled && c.sn.is_empty() {
+        return Err(AppError(StatusCode::BAD_REQUEST, "Bitte einen Speicher wählen".into()));
+    }
+    if !(0.0..=100.0).contains(&c.reserve) || !(c.reserve..=100.0).contains(&c.charge_until) {
+        return Err(AppError(StatusCode::BAD_REQUEST, "Reserve und „Laden bis“ müssen zwischen 0 und 100 % liegen, „Laden bis“ über der Reserve".into()));
+    }
+    {
+        let conn = s.db.lock().unwrap();
+        crate::regulator::save_config(&conn, &c)?;
+        db::log_event(&conn, &c.sn, "info", if c.enabled { "Regler gespeichert und eingeschaltet" } else { "Regler ausgeschaltet" });
+    }
+    s.regulator_restart.notify_one();
+    Ok(Json(json!({ "ok": true })))
 }

@@ -79,3 +79,7 @@ button.small { padding: 4px 10px; font-size: 13px; }
 .card-foot select { flex: 1; padding: 4px 8px; font-size: 13px; }
 .card.meter { margin-bottom: 24px; }
 .card.meter .kv { margin-top: 0; }
+.unit-input { display: flex; align-items: center; gap: 6px; }
+.unit-input input { flex: 1; }
+.unit-input span { color: var(--muted); font-size: 13px; min-width: 18px; }
+@media (max-width: 900px) { .grid[style*="1fr 1fr"] { grid-template-columns: 1fr !important; } }
