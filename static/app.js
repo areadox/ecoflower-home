@@ -39,7 +39,7 @@ async function guarded(fn) {
 }
 
 async function loadBase() {
-  [cache.status, cache.devices, cache.commands] = await Promise.all([api("/status"), api("/devices"), api("/commands")]);
+  [cache.status, cache.devices, cache.commands, cache.systems] = await Promise.all([api("/status"), api("/devices"), api("/commands"), api("/systems")]);
   document.getElementById("version").textContent = "v" + cache.status.version;
   const m = cache.status.mqtt || {};
   const mqttBadge = !cache.status.configured ? "" : m.connected
@@ -82,6 +82,7 @@ window.addEventListener("hashchange", route);
 async function renderOverview() {
   const devs = cache.devices;
   let html = `<div class="toolbar"><h1>Übersicht</h1><span class="spacer"></span>
+    <button class="secondary" id="new-system">Neues System</button>
     <button class="secondary" id="sync">Geräte von EcoFlow abrufen</button></div>`;
   if (!cache.status.configured) {
     html += `<div class="notice">Noch keine API-Zugangsdaten hinterlegt. Bitte zuerst unter <a href="#/settings">Einstellungen</a> Access Key und Secret Key eintragen.</div>`;
@@ -89,21 +90,94 @@ async function renderOverview() {
   if (!devs.length) {
     html += `<p class="muted">Noch keine Geräte. Klicken Sie auf „Geräte von EcoFlow abrufen“.</p>`;
   }
-  html += `<div id="system">${systemCard(devs)}</div>`;
-  html += `<h2>Speicher</h2><div class="grid">` + devs.map(deviceCard).join("") + `</div>`;
+  html += `<div id="systems">${systemsHtml()}</div>`;
   $app.innerHTML = html;
+  bindSystemControls();
+
   document.getElementById("sync").onclick = () => guarded(async () => {
     const r = await api("/devices/sync", { method: "POST" });
     toast(`${r.found} Geräte gefunden, ${r.added} neu`);
     setTimeout(route, 1500);
   });
+  document.getElementById("new-system").onclick = () => guarded(async () => {
+    const name = prompt("Name des neuen Systems (z. B. „Bad“):");
+    if (!name) return;
+    await api("/systems", { method: "POST", body: { name } });
+    route();
+  });
   route._timer = setInterval(() => guarded(async () => {
-    cache.devices = await api("/devices");
-    const grid = $app.querySelector(".grid");
-    if (grid) grid.innerHTML = cache.devices.map(deviceCard).join("");
-    const sys = document.getElementById("system");
-    if (sys) sys.innerHTML = systemCard(cache.devices);
+    // Nicht neu zeichnen, während eine Auswahlliste offen ist
+    if (document.activeElement && document.activeElement.tagName === "SELECT") return;
+    [cache.devices, cache.systems] = await Promise.all([api("/devices"), api("/systems")]);
+    const el = document.getElementById("systems");
+    if (el) { el.innerHTML = systemsHtml(); bindSystemControls(); }
   }), 15000);
+}
+
+// Haupt- vor Nebengeräten, dann nach Name
+const byRole = (a, b) => (a.role === "MASTER" ? 0 : 1) - (b.role === "MASTER" ? 0 : 1) || devName(a).localeCompare(devName(b));
+
+function systemsHtml() {
+  let html = "";
+  const count = id => cache.devices.filter(d => d.system_id === id).length;
+  const systems = [...cache.systems].sort((a, b) => count(b.id) - count(a.id) || a.name.localeCompare(b.name));
+  for (const sys of systems) {
+    const devs = cache.devices.filter(d => d.system_id === sys.id).sort(byRole);
+    html += `<section class="system-section">
+      <div class="toolbar system-head">
+        <h2>${esc(sys.name)}</h2>
+        <span class="muted">${devs.length} ${devs.length === 1 ? "Gerät" : "Geräte"}${sys.group_key ? " · von EcoFlow erkannt" : " · von Hand angelegt"}</span>
+        <span class="spacer"></span>
+        <button class="secondary small" data-rename="${sys.id}">Umbenennen</button>
+        <button class="secondary small" data-delsys="${sys.id}" title="System entfernen (Geräte bleiben erhalten)">✕</button>
+      </div>
+      ${devs.length ? systemCard(devs) : `<p class="muted">Noch keine Geräte in diesem System. Ordnen Sie unten auf einer Gerätekarte ein Gerät zu.</p>`}
+      <div class="grid">${devs.map(deviceCard).join("")}</div>
+    </section>`;
+  }
+  const loose = cache.devices.filter(d => !cache.systems.some(s => s.id === d.system_id)).sort(byRole);
+  if (loose.length) {
+    html += `<section class="system-section">
+      <div class="toolbar system-head"><h2>Ohne System</h2><span class="muted">${loose.length} ${loose.length === 1 ? "Gerät" : "Geräte"}</span></div>
+      ${cache.systems.length ? "" : `<div class="notice">Die Zuordnung zu Systemen kommt automatisch über die MQTT-Live-Daten (<span class="mono">systemGroupId</span>). Alternativ legen Sie mit „Neues System“ ein System an und ordnen die Geräte unten auf den Karten zu.</div>`}
+      ${systemCard(loose)}
+      <div class="grid">${loose.map(deviceCard).join("")}</div>
+    </section>`;
+  }
+  return html;
+}
+
+function systemSelect(d) {
+  const opts = cache.systems.map(s => `<option value="${s.id}" ${s.id === d.system_id ? "selected" : ""}>${esc(s.name)}</option>`).join("");
+  return `<select data-sysfor="${esc(d.sn)}" title="System, zu dem das Gerät gehört">
+    <option value="auto">automatisch${d.system_manual ? "" : " ✓"}</option>
+    <option value="0" ${d.system_manual && d.system_id == null ? "selected" : ""}>kein System</option>
+    ${d.system_manual ? opts : opts.replace(/ selected/g, "")}</select>`;
+}
+
+function bindSystemControls() {
+  $app.querySelectorAll("[data-sysfor]").forEach(sel => {
+    const d = cache.devices.find(x => x.sn === sel.dataset.sysfor);
+    if (d && !d.system_manual) sel.value = "auto";
+    sel.onchange = () => guarded(async () => {
+      const body = sel.value === "auto" ? { system_auto: true } : { system_id: Number(sel.value) };
+      await api(`/devices/${encodeURIComponent(sel.dataset.sysfor)}`, { method: "PUT", body });
+      toast("Zuordnung gespeichert");
+      route();
+    });
+  });
+  $app.querySelectorAll("[data-rename]").forEach(b => b.onclick = () => guarded(async () => {
+    const sys = cache.systems.find(x => x.id == b.dataset.rename);
+    const name = prompt("Neuer Name:", sys.name);
+    if (!name) return;
+    await api("/systems", { method: "POST", body: { id: sys.id, name } });
+    route();
+  }));
+  $app.querySelectorAll("[data-delsys]").forEach(b => b.onclick = () => guarded(async () => {
+    if (!confirm("System entfernen? Die Geräte bleiben erhalten und werden ggf. automatisch neu zugeordnet.")) return;
+    await api("/systems/" + b.dataset.delsys, { method: "DELETE" });
+    route();
+  }));
 }
 
 function systemCard(devs) {
@@ -111,7 +185,7 @@ function systemCard(devs) {
   if (!m) return "";
   const soc = m.sys_soc ?? 0;
   return `<div class="card system">
-    <h3><span>System</span><span class="muted">Werte vom Hauptgerät ${esc(devName(m))}</span></h3>
+    <h3><span>Systemwerte${m.mode ? ` <span class="badge">${esc(m.mode)}</span>` : ""}</span><span class="muted">vom Hauptgerät ${esc(devName(m))}</span></h3>
     <div class="row" style="align-items:center">
       <div><div class="soc">${fmtNum(m.sys_soc, " %")}</div>
         <div class="bar"><div style="width:${soc}%"></div>${m.min_dsg != null ? `<div class="mark" style="left:${m.min_dsg}%"></div>` : ""}</div></div>
@@ -161,7 +235,8 @@ function deviceCard(d) {
       <dt>AC-Ausgang 1 / 2</dt><dd>${onOff(d.ac1_on)} / ${onOff(d.ac2_on)}</dd>
       <dt>Live-Daten (MQTT)</dt><dd>${fmtTime(d.mqtt_ts)}</dd>
       <dt>Letzte Abfrage</dt><dd>${fmtTime(d.last_poll)}</dd>
-    </dl></a></div>`;
+    </dl></a>
+    <div class="card-foot"><span class="muted">System</span>${systemSelect(d)}</div></div>`;
 }
 
 // ---------- Gerät ----------
@@ -185,6 +260,7 @@ async function renderDevice(sn) {
         <label>Anzeigename</label><input id="alias" value="${esc(d.alias)}" placeholder="${esc(d.name)}">
         <label>Quota für den Ladestand <span class="muted">(leer = automatisch)</span></label>
         <input id="soc_key" value="${esc(d.soc_key)}" placeholder="bmsBattSoc, soc, f32ShowSoc …">
+        <label>System</label>${systemSelect(d)}
         <label class="checkbox"><input type="checkbox" id="enabled" ${d.enabled ? "checked" : ""}> regelmäßig abfragen</label>
         <div class="row" style="margin-top:12px"><button id="save-dev">Speichern</button>
           <button class="secondary" id="refresh">Jetzt abfragen</button></div>
@@ -221,6 +297,7 @@ async function renderDevice(sn) {
   };
   document.getElementById("filter").oninput = drawQuotas;
   drawQuotas();
+  bindSystemControls();
 
   document.getElementById("save-dev").onclick = () => guarded(async () => {
     await api(`/devices/${encodeURIComponent(sn)}`, { method: "PUT", body: {

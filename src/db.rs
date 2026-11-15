@@ -91,8 +91,31 @@ pub fn open(path: &str) -> Result<Connection> {
         CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
         "#,
     )?;
+    migrate(&conn)?;
     seed_commands(&conn)?;
     Ok(conn)
+}
+
+/// Spätere Schema-Erweiterungen für bestehende Datenbanken.
+fn migrate(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS systems (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            name      TEXT NOT NULL,
+            group_key TEXT UNIQUE
+        );",
+    )?;
+    let has_col = |col: &str| -> Result<bool> {
+        let mut stmt = conn.prepare("SELECT 1 FROM pragma_table_info('devices') WHERE name = ?1")?;
+        Ok(stmt.exists([col])?)
+    };
+    if !has_col("system_id")? {
+        conn.execute_batch(
+            "ALTER TABLE devices ADD COLUMN system_id INTEGER;
+             ALTER TABLE devices ADD COLUMN system_manual INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+    Ok(())
 }
 
 /// Vorlagen für STREAM-Geräte (Format wie bei evcc / hassio-ecoflow-cloud).
@@ -233,11 +256,16 @@ pub struct Device {
     pub load_w: Option<f64>,
     pub mqtt_ts: Option<i64>,
     pub activity: Option<crate::engine::Activity>,
+    pub system_id: Option<i64>,
+    pub system_manual: bool,
+    pub mode: Option<String>,
+    pub feed_grid_mode: Option<f64>,
 }
 
 pub fn list_devices(conn: &Connection) -> Result<Vec<Device>> {
     let mut stmt = conn.prepare(
-        "SELECT sn, name, product, alias, online, enabled, soc_key, role, soc, last_poll, last_error, quotas
+        "SELECT sn, name, product, alias, online, enabled, soc_key, role, soc, last_poll, last_error, quotas,
+                system_id, system_manual
          FROM devices ORDER BY CASE WHEN alias = '' THEN name ELSE alias END, sn",
     )?;
     let rows = stmt
@@ -272,6 +300,21 @@ pub fn list_devices(conn: &Connection) -> Result<Vec<Device>> {
                 load_w: num("powGetSysLoad"),
                 mqtt_ts: num("quota_mqtt_ts").map(|v| v as i64),
                 activity,
+                system_id: r.get(12)?,
+                system_manual: r.get::<_, i64>(13)? != 0,
+                mode: {
+                    let b = |k: &str| q.get(k).and_then(|v| v.as_bool());
+                    if b("energyStrategyOperateMode.operateSelfPoweredOpen") == Some(true) {
+                        Some("Eigenverbrauch".into())
+                    } else if b("energyStrategyOperateMode.operateIntelligentScheduleModeOpen") == Some(true) {
+                        Some("Intelligenter Zeitplan".into())
+                    } else if q.get("energyStrategyOperateMode.operateSelfPoweredOpen").is_some() {
+                        Some("Benutzerdefiniert".into())
+                    } else {
+                        None
+                    }
+                },
+                feed_grid_mode: num("feedGridMode"),
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -313,6 +356,53 @@ pub fn merge_quotas(conn: &Connection, sn: &str, new: &serde_json::Map<String, V
         params![sn, serde_json::to_string(&merged)?],
     )?;
     Ok(merged)
+}
+
+// ---------- Systeme ----------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct System {
+    pub id: i64,
+    pub name: String,
+    pub group_key: Option<String>,
+}
+
+pub fn list_systems(conn: &Connection) -> Result<Vec<System>> {
+    let mut stmt = conn.prepare("SELECT id, name, group_key FROM systems ORDER BY name, id")?;
+    let rows = stmt
+        .query_map([], |r| Ok(System { id: r.get(0)?, name: r.get(1)?, group_key: r.get(2)? }))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Gerät anhand der von EcoFlow gemeldeten Gruppe einem System zuordnen
+/// (außer, es wurde von Hand zugeordnet).
+pub fn auto_assign_system(conn: &Connection, sn: &str, group: &str) -> Result<()> {
+    let manual: i64 = conn
+        .query_row("SELECT system_manual FROM devices WHERE sn = ?1", [sn], |r| r.get(0))
+        .optional()?
+        .unwrap_or(0);
+    if manual != 0 {
+        return Ok(());
+    }
+    let id: Option<i64> = conn
+        .query_row("SELECT id FROM systems WHERE group_key = ?1", [group], |r| r.get(0))
+        .optional()?;
+    let id = match id {
+        Some(id) => id,
+        None => {
+            let n: i64 = conn.query_row("SELECT COUNT(*) FROM systems", [], |r| r.get(0))?;
+            conn.execute(
+                "INSERT INTO systems (name, group_key) VALUES (?1, ?2)",
+                params![format!("System {}", n + 1), group],
+            )?;
+            let id = conn.last_insert_rowid();
+            log_event(conn, sn, "info", &format!("Neues EcoFlow-System erkannt: „System {}“", n + 1));
+            id
+        }
+    };
+    conn.execute("UPDATE devices SET system_id = ?2 WHERE sn = ?1 AND (system_id IS NOT ?2)", params![sn, id])?;
+    Ok(())
 }
 
 pub fn device_soc_key(conn: &Connection, sn: &str) -> Result<String> {

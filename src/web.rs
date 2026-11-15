@@ -38,6 +38,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/status", get(status))
         .route("/settings", get(get_settings).post(save_settings))
         .route("/devices", get(list_devices))
+        .route("/systems", get(list_systems).post(save_system))
+        .route("/systems/{id}", delete(delete_system))
         .route("/devices/sync", post(sync_devices))
         .route("/devices/{sn}", put(update_device))
         .route("/devices/{sn}/quotas", get(device_quotas))
@@ -200,6 +202,10 @@ async fn sync_devices(State(s): State<Arc<AppState>>) -> AppResult<Json<Value>> 
 
 #[derive(Deserialize)]
 struct DeviceInput {
+    /// > 0 = System von Hand zuordnen, 0 = keinem System zuordnen
+    system_id: Option<i64>,
+    /// true = Zuordnung wieder automatisch (über systemGroupId von EcoFlow)
+    system_auto: Option<bool>,
     alias: Option<String>,
     enabled: Option<bool>,
     soc_key: Option<String>,
@@ -216,6 +222,15 @@ async fn update_device(
     }
     if let Some(v) = i.enabled {
         conn.execute("UPDATE devices SET enabled=?2 WHERE sn=?1", rusqlite::params![sn, v as i64])?;
+    }
+    if i.system_auto == Some(true) {
+        conn.execute("UPDATE devices SET system_manual=0 WHERE sn=?1", [&sn])?;
+    } else if let Some(id) = i.system_id {
+        let id = (id > 0).then_some(id);
+        conn.execute(
+            "UPDATE devices SET system_id=?2, system_manual=1 WHERE sn=?1",
+            rusqlite::params![sn, id],
+        )?;
     }
     if let Some(v) = i.soc_key {
         conn.execute("UPDATE devices SET soc_key=?2 WHERE sn=?1", rusqlite::params![sn, v.trim()])?;
@@ -290,6 +305,42 @@ async fn send_command(
             Err(AppError(StatusCode::BAD_GATEWAY, e.to_string()))
         }
     }
+}
+
+// ---------- Systeme ----------
+
+async fn list_systems(State(s): State<Arc<AppState>>) -> AppResult<Json<Value>> {
+    let conn = s.db.lock().unwrap();
+    Ok(Json(json!(db::list_systems(&conn)?)))
+}
+
+#[derive(Deserialize)]
+struct SystemInput {
+    #[serde(default)]
+    id: i64,
+    name: String,
+}
+
+async fn save_system(State(s): State<Arc<AppState>>, Json(i): Json<SystemInput>) -> AppResult<Json<Value>> {
+    let name = i.name.trim();
+    if name.is_empty() {
+        return Err(AppError(StatusCode::BAD_REQUEST, "Bitte einen Namen eingeben".into()));
+    }
+    let conn = s.db.lock().unwrap();
+    if i.id > 0 {
+        conn.execute("UPDATE systems SET name=?2 WHERE id=?1", rusqlite::params![i.id, name])?;
+        Ok(Json(json!({ "id": i.id })))
+    } else {
+        conn.execute("INSERT INTO systems (name) VALUES (?1)", [name])?;
+        Ok(Json(json!({ "id": conn.last_insert_rowid() })))
+    }
+}
+
+async fn delete_system(State(s): State<Arc<AppState>>, Path(id): Path<i64>) -> AppResult<Json<Value>> {
+    let conn = s.db.lock().unwrap();
+    conn.execute("UPDATE devices SET system_id=NULL, system_manual=0 WHERE system_id=?1", [id])?;
+    conn.execute("DELETE FROM systems WHERE id=?1", [id])?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 // ---------- Befehle ----------
@@ -449,6 +500,7 @@ async fn export(State(s): State<Arc<AppState>>) -> AppResult<Response> {
             "update": update,
             "devices": devices,
             "device_data": device_data,
+            "systems": db::list_systems(&conn)?,
             "commands": db::list_commands(&conn)?,
             "rules": db::list_rules(&conn, None)?,
             "events": db::list_events(&conn, 500, None)?,

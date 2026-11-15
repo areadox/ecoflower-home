@@ -61,8 +61,17 @@ pub fn pick_soc(quotas: &Map<String, Value>, override_key: &str) -> Option<f64> 
 /// Haupt- oder Nebengerät? Aus MQTT kommt `distributedDeviceStatus`; ohne MQTT
 /// gilt: Nur das Hauptgerät meldet einen Systemladestand (`cmsBattSoc`) über 0.
 pub fn pick_role(quotas: &Map<String, Value>) -> String {
-    if let Some(r) = ROLE_KEYS.iter().find_map(|k| quotas.get(*k).and_then(|v| v.as_str()).filter(|s| !s.is_empty())) {
-        return r.to_string();
+    for k in ROLE_KEYS {
+        match quotas.get(k) {
+            Some(Value::String(s)) if !s.is_empty() => return s.to_uppercase(),
+            // MQTT liefert die Rolle teils als Zahl: 0 = Wahl läuft, 1 = Haupt, 2 = Neben
+            Some(v) => match as_f64(v).map(|n| n as i64) {
+                Some(1) => return "MASTER".into(),
+                Some(2) => return "SLAVE".into(),
+                _ => {}
+            },
+            None => {}
+        }
     }
     match quotas.get("cmsBattSoc").and_then(as_f64) {
         Some(v) if v > 0.0 => "MASTER".into(),
@@ -119,6 +128,16 @@ pub fn pick_activity(quotas: &Map<String, Value>, role: &str) -> Option<Activity
     None
 }
 
+/// `systemGroupId` als Text (0 bzw. leer = kein System)
+fn group_key(v: &Value) -> Option<String> {
+    let s = match v {
+        Value::String(s) => s.trim().to_string(),
+        Value::Number(n) => n.to_string(),
+        _ => return None,
+    };
+    (!s.is_empty() && s != "0").then_some(s)
+}
+
 /// Neue Werte (HTTP oder MQTT) speichern und Ladestand/Rolle neu bestimmen.
 pub fn apply_quotas(
     conn: &rusqlite::Connection,
@@ -133,6 +152,9 @@ pub fn apply_quotas(
         "UPDATE devices SET soc=?2, role=?3, online=1 WHERE sn=?1",
         rusqlite::params![sn, soc, role],
     )?;
+    if let Some(group) = merged.get("systemGroupId").and_then(group_key) {
+        db::auto_assign_system(conn, sn, &group)?;
+    }
     Ok((merged, soc))
 }
 
@@ -489,5 +511,7 @@ mod tests {
         let haupt: Map<String, Value> = serde_json::from_value(json!({"cmsBattSoc": 78.0})).unwrap();
         assert_eq!(pick_soc(&haupt, ""), Some(78.0));
         assert_eq!(pick_role(&haupt), "MASTER");
+        let zahl: Map<String, Value> = serde_json::from_value(json!({"distributedDeviceStatus": 2, "cmsBattSoc": 50})).unwrap();
+        assert_eq!(pick_role(&zahl), "SLAVE");
     }
 }
