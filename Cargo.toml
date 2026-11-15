@@ -1,6 +1,6 @@
 [package]
 name = "ecoflower-home"
-version = "0.0.8"
+version = "0.0.9"
 edition = "2021"
 description = "Linux-Server mit Weboberfläche zur Verwaltung von EcoFlow-STREAM-Speichern über die EcoFlow-IoT-API"
 license = "MIT"

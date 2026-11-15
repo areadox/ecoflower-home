@@ -1,11 +1,7 @@
-### Neu in 0.0.8
-- **Regler für einen Einzelspeicher** (neuer Menüpunkt *Regler*) – gedacht für einen Speicher in einem eigenen EcoFlow-System ohne Zähler, z. B. den AC Pro Bad:
-  - **gibt ab**, was das Haus braucht: oberhalb der Mindestreserve (Standard 60 %) wird die Abgabe über das Einspeiselimit nachgeführt, bis der Shelly ca. +20 W zeigt (max. 600 W)
-  - **lädt nur aus Überschuss**: ab 800 W Einspeisung (60 s lang) wird das Laden gestartet; es stoppt bei Netzbezug oder wenn das Hauptsystem dafür entladen müsste
-  - **kein Nachladen aus dem Netz**: unter der Mindestreserve wird die Reserve auf den aktuellen Ladestand gesetzt
-  - ohne Zählerwerte wird die Abgabe aus Sicherheitsgründen auf 0 W gesetzt
-  - alle Schwellen einstellbar, Live-Status und die letzten Aktionen auf der Seite, Testmodus wird beachtet
-- Regler-Einstellungen und -Status im Daten-Download
+### Neu in 0.0.9
+- **Anzeige lädt/entlädt auf den Gerätekarten korrigiert:** Der Zustand wird jetzt aus der Energiebilanz berechnet (Solar − Abgabe ans Haus − Steckdosen), die alle ~2 Sekunden aktualisiert wird. Bisher kam er aus dem BMS-Status, der seltener und teils falsch gemeldet wird – z. B. „Standby“, während ein AC Pro 300 W ans Haus abgab, oder „entlädt“ bei einem Gerät, das eigentlich lud.
+- Auch die angezeigte **Leistung pro Gerät** stimmt jetzt (z. B. Ultra: 678 W statt 222 W)
+- Mauszeiger auf die Anzeige zeigt weiterhin die verwendete Quelle
 
 ### Update
 In der Weboberfläche unter *Einstellungen → Update*.

@@ -103,9 +103,14 @@ pub struct Activity {
 }
 
 /// Was macht der Speicher gerade? Reihenfolge der Quellen:
-/// 1. `bmsChgDsgState` (MQTT, pro Gerät): 0 = Standby, 1 = Entladen, 2 = Laden
-/// 2. Akkustrom `amp` (mA) mit Vorzeichen (MQTT, pro Gerät)
-/// 3. nur Hauptgerät: `cmsChgDsgState` bzw. Vorzeichen von `powGetBpCms` (Systemwerte)
+/// 1. **Energiebilanz** (MQTT, alle ~2 s, pro Gerät):
+///    Akku = Solar (`powGetPv`…`powGetPv4`) − Netzanschluss (`gridConnectionPower`, + = Abgabe ans Haus)
+///    − Steckdosen (`offgrid1/2ActivePower`). Positiv = Laden.
+///    Die BMS-Werte (`bmsChgDsgState`, `amp`) kommen seltener und erfassen teils nur einen
+///    Akkublock – im Betrieb zeigten sie z. B. „Standby“, während ein AC Pro 300 W abgab.
+/// 2. `bmsChgDsgState` (0 = Standby, 1 = Entladen, 2 = Laden), falls keine Bilanz möglich ist
+/// 3. Akkustrom `amp` × `vol`
+/// 4. nur Hauptgerät: `cmsChgDsgState` bzw. Vorzeichen von `powGetBpCms` (Systemwerte)
 pub fn pick_activity(quotas: &Map<String, Value>, role: &str) -> Option<Activity> {
     let num = |k: &str| quotas.get(k).and_then(as_f64);
     // Leistung pro Gerät aus Strom (mA) × Spannung (mV)
@@ -119,6 +124,14 @@ pub fn pick_activity(quotas: &Map<String, Value>, role: &str) -> Option<Activity
         0 => Some("idle"),
         _ => None,
     };
+    // Energiebilanz nur mit MQTT-Daten (die HTTP-Abfrage liefert keine Solarwerte pro Gerät)
+    if let (Some(grid_conn), true) = (num("gridConnectionPower"), quotas.contains_key("powGetPv")) {
+        let pv: f64 = ["powGetPv", "powGetPv2", "powGetPv3", "powGetPv4"].iter().filter_map(|k| num(k)).sum();
+        let outlets: f64 = ["offgrid1ActivePower", "offgrid2ActivePower"].iter().filter_map(|k| num(k)).sum();
+        let p = pv - grid_conn - outlets;
+        let state = if p > 30.0 { "charging" } else if p < -30.0 { "discharging" } else { "idle" };
+        return Some(Activity { state, source: "Energiebilanz (Solar − Netzanschluss − Steckdosen)", power_w: Some(p.abs()) });
+    }
     if let Some(state) = num("bmsChgDsgState").and_then(from_code) {
         return Some(Activity { state, source: "bmsChgDsgState", power_w: unit_power.map(f64::abs) });
     }
@@ -481,6 +494,29 @@ mod tests {
         assert_eq!(render_command(tpl, "BK123", "20").unwrap(), json!({"sn":"BK123","cmdId":17,"params":{"cfgMinDsgSoc":20}}));
         assert_eq!(render_command(tpl, "BK123", "false").unwrap()["params"]["cfgMinDsgSoc"], json!(false));
         assert!(render_command("{kaputt", "x", "1").is_err());
+    }
+
+    #[test]
+    fn zustand_aus_energiebilanz() {
+        let q = |v: Value| -> Map<String, Value> { serde_json::from_value(v).unwrap() };
+        // Echte Werte: AC Pro gibt 304 W ab, BMS meldet „Standby“ → Bilanz gewinnt
+        let ac_pro = q(json!({"powGetPv": 0.0, "powGetPv2": 0.0, "gridConnectionPower": 304.1,
+            "offgrid1ActivePower": 9, "offgrid2ActivePower": 3, "bmsChgDsgState": 0, "amp": -120, "vol": 19550}));
+        let a = pick_activity(&ac_pro, "SLAVE").unwrap();
+        assert_eq!(a.state, "discharging");
+        assert_eq!(a.power_w.map(f64::round), Some(316.0));
+        // Ultra: 769 W Solar, 84 W ans Haus → lädt ca. 678 W
+        let ultra = q(json!({"powGetPv": 234.2, "powGetPv2": 228.3, "powGetPv3": 241.5, "powGetPv4": 65.1,
+            "gridConnectionPower": 84.1, "offgrid1ActivePower": 6, "offgrid2ActivePower": 1, "bmsChgDsgState": 2}));
+        let a = pick_activity(&ultra, "SLAVE").unwrap();
+        assert_eq!(a.state, "charging");
+        assert_eq!(a.power_w.map(f64::round), Some(678.0));
+        // AC Pro lädt aus dem Netz (Netzanschluss negativ)
+        let bad = q(json!({"powGetPv": 0.0, "gridConnectionPower": -1052.4, "offgrid2ActivePower": -2}));
+        assert_eq!(pick_activity(&bad, "MASTER").unwrap().state, "charging");
+        // nur HTTP-Daten (ohne Solarwerte pro Gerät) → keine Bilanz
+        let http = q(json!({"gridConnectionPower": 300.0, "cmsBattSoc": 0.0}));
+        assert_eq!(pick_activity(&http, "SLAVE"), None);
     }
 
     #[test]
