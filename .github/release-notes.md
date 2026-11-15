@@ -1,10 +1,8 @@
-### Neu in 0.0.6
-- **Stromzähler Shelly Pro 3EM:** unter *Einstellungen* IP-Adresse und (falls im Shelly eingeschaltet) Passwort eintragen, mit **Verbindungstest**. Abfrage direkt im Heimnetz, Standard alle 2 Sekunden – deutlich schneller als über die EcoFlow-Cloud.
-- **Live-Anzeige in der Übersicht:** Bezug bzw. Einspeisung und die drei Phasen, aktualisiert alle 3 Sekunden; Verlauf wird alle 30 Sekunden gespeichert
-- **Rolle Haupt/Neben korrigiert:** Nebengeräte wurden als „ELECTION“ angezeigt, jetzt wird `seriesConnectDeviceStatus` mit ausgewertet
-- **Befehlsvorlagen korrigiert:** Entlade- und Ladegrenze verwenden jetzt `cfgCmsMinDsgSoc`/`cfgCmsMaxChgSoc` (gleiches Muster wie die funktionierende Backup-Reserve); bestehende Vorlagen werden automatisch angepasst
-- **Neue Vorlage „STREAM Einspeiselimit“** (`cfgFeedGridModePowLimit`) zum Testen
-- Stromzähler im Daten-Download (ohne Passwort)
+### Neu in 0.0.7
+- **Shelly 3EM der ersten Generation** (`SHEM-3`) wird jetzt unterstützt. Bisher ging nur der Shelly Pro 3EM, deshalb schlug die Verbindung zum 3EM fehl.
+- Die Generation wird automatisch über `/shelly` erkannt; angezeigt wird z. B. „SHEM-3 (Gen1)“
+- Anmeldung beim Shelly 3EM per Benutzer/Passwort (Standardbenutzer `admin`, sonst `benutzer:passwort` ins Passwortfeld)
+- README: Tabelle zu den unterstützten Shelly-Zählern
 
 ### Update
 In der Weboberfläche unter *Einstellungen → Update*.

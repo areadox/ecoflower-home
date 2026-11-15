@@ -1,8 +1,12 @@
-//! Stromzähler Shelly Pro 3EM – direkt im Heimnetz über die lokale RPC-Schnittstelle.
+//! Stromzähler Shelly 3EM / Shelly Pro 3EM – direkt im Heimnetz.
 //!
-//! `GET http://<IP>/rpc/EM.GetStatus?id=0` liefert `total_act_power` in W
-//! (positiv = Bezug aus dem Netz, negativ = Einspeisung). Ist die Anmeldung am
-//! Shelly eingeschaltet, wird HTTP-Digest mit SHA-256 und Benutzer „admin“ verwendet.
+//! Die Generation wird über `GET /shelly` erkannt:
+//! - **Gen1** (Shelly 3EM, `"type":"SHEM-3"`): `GET /status` liefert `emeters[].power`
+//!   und `total_power`; Anmeldung per HTTP-Basic (Benutzer „admin“).
+//! - **Gen2+** (Shelly Pro 3EM, `"gen":2`): `GET /rpc/EM.GetStatus?id=0` liefert
+//!   `total_act_power`; Anmeldung per HTTP-Digest mit SHA-256 (Benutzer „admin“).
+//!
+//! Leistung: positiv = Bezug aus dem Netz, negativ = Einspeisung.
 
 use crate::db;
 use crate::AppState;
@@ -93,9 +97,16 @@ async fn rpc_get(client: &reqwest::Client, cfg: &MeterConfig, path: &str) -> Res
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_string();
-        let cnonce = format!("{:016x}", rand::random::<u64>());
-        let auth = digest_authorization(&www, &cfg.password, "GET", path, &cnonce)?;
-        let r = client.get(&url).header(reqwest::header::AUTHORIZATION, auth).send().await?;
+        let req = client.get(&url);
+        let req = if www.to_ascii_lowercase().starts_with("basic") {
+            // Gen1: Benutzer „admin“ oder „benutzer:passwort“ im Passwortfeld
+            let (user, pw) = cfg.password.split_once(':').unwrap_or(("admin", cfg.password.as_str()));
+            req.basic_auth(user, Some(pw))
+        } else {
+            let cnonce = format!("{:016x}", rand::random::<u64>());
+            req.header(reqwest::header::AUTHORIZATION, digest_authorization(&www, &cfg.password, "GET", path, &cnonce)?)
+        };
+        let r = req.send().await?;
         if r.status() == reqwest::StatusCode::UNAUTHORIZED {
             bail!("Passwort für den Shelly ist falsch");
         }
@@ -109,7 +120,7 @@ async fn rpc_get(client: &reqwest::Client, cfg: &MeterConfig, path: &str) -> Res
     Ok(resp.json().await?)
 }
 
-/// Einmal lesen: zuerst dreiphasig (EM), sonst einphasige Kanäle (EM1) aufsummiert.
+/// Einmal lesen. Erkennt die Shelly-Generation über `/shelly`.
 pub async fn read_once(cfg: &MeterConfig) -> Result<MeterStatus> {
     if cfg.host.is_empty() {
         bail!("Keine IP-Adresse eingetragen");
@@ -117,10 +128,24 @@ pub async fn read_once(cfg: &MeterConfig) -> Result<MeterStatus> {
     let client = reqwest::Client::builder().timeout(Duration::from_secs(5)).build()?;
     let mut status = MeterStatus { configured: true, ok: true, ts: Some(chrono::Utc::now().timestamp()), ..Default::default() };
 
-    if let Ok(info) = rpc_get(&client, cfg, "/rpc/Shelly.GetDeviceInfo").await {
-        status.model = info.get("model").or_else(|| info.get("app")).and_then(|v| v.as_str()).map(String::from);
+    // /shelly ist bei allen Generationen ohne Anmeldung abrufbar
+    let info = rpc_get(&client, cfg, "/shelly").await?;
+    let gen = info.get("gen").and_then(|v| v.as_u64()).unwrap_or(1);
+    if gen < 2 {
+        let typ = info.get("type").and_then(|v| v.as_str()).unwrap_or("Shelly");
+        status.model = Some(format!("{typ} (Gen1)"));
+        let st = rpc_get(&client, cfg, "/status").await?;
+        let (power, phases) = parse_gen1_status(&st)?;
+        status.power_w = Some(power);
+        status.phases = phases;
+        return Ok(status);
     }
 
+    status.model = info
+        .get("model")
+        .or_else(|| info.get("app"))
+        .and_then(|v| v.as_str())
+        .map(|m| format!("{m} (Gen{gen})"));
     match rpc_get(&client, cfg, "/rpc/EM.GetStatus?id=0").await {
         Ok(v) if v.get("total_act_power").is_some() => {
             status.power_w = v["total_act_power"].as_f64();
@@ -145,12 +170,26 @@ pub async fn read_once(cfg: &MeterConfig) -> Result<MeterStatus> {
                 }
             }
             if phases.is_empty() {
-                bail!("Keine Leistungswerte vom Shelly erhalten – ist es ein Shelly Pro 3EM?");
+                bail!("Keine Leistungswerte vom Shelly erhalten – ist es ein 3EM?");
             }
             status.power_w = Some(phases.iter().sum());
             status.phases = phases;
             Ok(status)
         }
+    }
+}
+
+/// Gen1-`/status`: `emeters[].power` je Phase, Summe aus `total_power` oder den Phasen.
+pub fn parse_gen1_status(st: &Value) -> Result<(f64, Vec<f64>)> {
+    let phases: Vec<f64> = st
+        .get("emeters")
+        .and_then(|e| e.as_array())
+        .map(|arr| arr.iter().filter_map(|m| m.get("power").and_then(|p| p.as_f64())).collect())
+        .unwrap_or_default();
+    let total = st.get("total_power").and_then(|v| v.as_f64()).or_else(|| (!phases.is_empty()).then(|| phases.iter().sum()));
+    match total {
+        Some(t) => Ok((t, phases)),
+        None => bail!("Keine Leistungswerte vom Shelly erhalten – ist es ein 3EM?"),
     }
 }
 
@@ -229,6 +268,19 @@ mod tests {
         let resp = sha256_hex(&format!("{ha1}:60dc59c6:00000001:0123456789abcdef:auth:{ha2}"));
         assert!(a.contains(&format!("response=\"{resp}\"")));
         assert!(a.starts_with("Digest username=\"admin\""));
+    }
+
+    #[test]
+    fn gen1_status() {
+        let st = serde_json::json!({"emeters": [
+            {"power": 120.5, "is_valid": true}, {"power": -480.0, "is_valid": true}, {"power": 15.2, "is_valid": true}
+        ], "total_power": -344.3});
+        let (t, p) = parse_gen1_status(&st).unwrap();
+        assert_eq!(t, -344.3);
+        assert_eq!(p, vec![120.5, -480.0, 15.2]);
+        let ohne_total = serde_json::json!({"emeters": [{"power": 100.0}, {"power": 50.0}]});
+        assert_eq!(parse_gen1_status(&ohne_total).unwrap().0, 150.0);
+        assert!(parse_gen1_status(&serde_json::json!({})).is_err());
     }
 
     #[test]

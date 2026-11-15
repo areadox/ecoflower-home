@@ -595,8 +595,8 @@ async function renderSettings() {
     </div>
 
     <div class="card" style="margin-top:16px">
-      <h3>Stromzähler (Shelly Pro 3EM)</h3>
-      <div class="muted">Wird direkt im Heimnetz abgefragt – schneller als über die EcoFlow-Cloud. Grundlage für spätere Regelungen.</div>
+      <h3>Stromzähler (Shelly 3EM / Pro 3EM)</h3>
+      <div class="muted">Wird direkt im Heimnetz abgefragt – schneller als über die EcoFlow-Cloud. Generation (Shelly 3EM bzw. Pro 3EM) wird automatisch erkannt. Benutzer ist „admin“; einen anderen Benutzer beim Shelly 3EM als <span class="mono">benutzer:passwort</span> eintragen.</div>
       <div class="row">
         <div><label>IP-Adresse oder Name (leer = aus)</label><input id="m-host" value="${esc(s.shelly_host)}" placeholder="192.168.1.50"></div>
         <div><label>Passwort ${s.shelly_password_set ? '<span class="badge ok">gespeichert</span>' : '<span class="muted">(nur falls im Shelly eingeschaltet)</span>'}</label>

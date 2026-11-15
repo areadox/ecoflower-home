@@ -20,7 +20,7 @@ Ziel: **jedem Speicher eigene Regeln geben**, z. B. eigene Entladegrenzen pro Ge
   - **Schwellwert:** schaltet beim Erreichen eines Ladestands, mit Hysterese, z. B. „bei ≤ 20 % AC-Ausgang aus, bei ≥ 30 % wieder an“
   - optional mit **Zeitfenster** (auch über Mitternacht, z. B. 22:00–06:00)
 - **Testmodus** (Standard): Regeln protokollieren nur, was sie tun würden, und senden nichts
-- **Stromzähler Shelly Pro 3EM:** direkt im Heimnetz abgefragt (IP-Adresse und optionales Passwort in den Einstellungen, mit Verbindungstest), Live-Anzeige von Bezug/Einspeisung und Phasen in der Übersicht, Verlauf in der Datenbank
+- **Stromzähler Shelly 3EM (Gen1) und Shelly Pro 3EM (Gen2):** Generation wird automatisch erkannt, direkt im Heimnetz abgefragt (IP-Adresse und optionales Passwort in den Einstellungen, mit Verbindungstest), Live-Anzeige von Bezug/Einspeisung und Phasen in der Übersicht, Verlauf in der Datenbank
 - **Ereignisprotokoll** aller Aktionen und Fehler
 - **Updates per Klick** in der Weboberfläche (GitHub-Release, mit Prüfsummenkontrolle)
 - **Daten-Download** zur Fehlersuche (alle Werte, letzte MQTT-Nachrichten, Regeln, Ereignisse – ohne Secret Key)
@@ -137,7 +137,7 @@ Erkenntnisse aus dem Betrieb mit Ultra X (Hauptgerät), Ultra und zwei AC Pro:
 - **Ladestand pro Speicher** (`bmsBattSoc`/`soc`) kommt nur über **MQTT**
 - **Systemzugehörigkeit** (`systemGroupId`) und Rolle kommen über MQTT. Bei Nebengeräten steht `distributedDeviceStatus` oft auf `ELECTION`; verlässlich ist `seriesConnectDeviceStatus` (`MASTER`/`SLAVE`).
 - **Einzelsystem ohne Zähler** (z. B. ein AC Pro allein): Liegt die Backup-Reserve über dem Ladestand, lädt das Gerät mit voller Leistung (`powSysAcInMax`, beim AC Pro ca. 1050 W) **aus dem Netz** bis zur Reserve. Als Hausverbrauch nimmt es ohne Zähler einen festen Wert an (`emsSetRatedPower`, z. B. 600 W).
-- **Backup-Reserve, Grenzen und Betriebsmodus** gelten pro EcoFlow-System. Ein Speicher, der eigene Werte braucht, muss in der EcoFlow-App in ein eigenes System. Ein Smart Meter (z. B. Shelly Pro 3EM) lässt sich dabei nur einem System zuordnen.
+- **Backup-Reserve, Grenzen und Betriebsmodus** gelten pro EcoFlow-System. Ein Speicher, der eigene Werte braucht, muss in der EcoFlow-App in ein eigenes System. Ein Smart Meter (z. B. Shelly 3EM) lässt sich dabei nur einem System zuordnen.
 - **Zustand pro Speicher** (lädt/entlädt/Standby) ebenfalls nur über MQTT: `bmsChgDsgState` (0 = Standby, 1 = Entladen, 2 = Laden), ersatzweise der Akkustrom `amp` × `vol`. Ohne MQTT ist der Zustand nur beim Hauptgerät bekannt (Vorzeichen von `powGetBpCms`, positiv = Laden), alle anderen zeigen „unbekannt“.
 - **Backup-Reserve** gilt immer für das ganze System. Wird sie an einem Gerät gesetzt, übernehmen alle Geräte den Wert.
 - Lade- und Entladegrenze melden alle Geräte gleich. Ob ein Nebengerät eine eigene Grenze annimmt, zeigt die Regel „Wert halten“ (Status „übernommen“ oder „nicht übernommen“).
@@ -178,3 +178,12 @@ Dies ist ein unabhängiges Projekt und steht in keiner Verbindung zu EcoFlow. Di
 ## Lizenz
 
 MIT
+
+## Stromzähler (Shelly)
+
+| Gerät | Erkennung (`/shelly`) | Abfrage | Anmeldung |
+|-------|-----------------------|---------|-----------|
+| Shelly 3EM (Gen1) | `"type":"SHEM-3"` | `/status` → `emeters[].power`, `total_power` | HTTP-Basic, Benutzer `admin` (oder `benutzer:passwort` ins Passwortfeld) |
+| Shelly Pro 3EM (Gen2+) | `"gen":2` | `/rpc/EM.GetStatus?id=0` → `total_act_power` (einphasiges Profil: `EM1.GetStatus`) | HTTP-Digest SHA-256, Benutzer `admin` |
+
+Positive Werte bedeuten Bezug aus dem Netz, negative Einspeisung.
