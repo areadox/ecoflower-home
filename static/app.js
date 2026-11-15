@@ -118,7 +118,7 @@ async function renderOverview() {
   });
   route._timer = setInterval(() => guarded(async () => {
     // Nicht neu zeichnen, während eine Auswahlliste offen ist
-    if (document.activeElement && document.activeElement.tagName === "SELECT") return;
+    if (document.activeElement && ["SELECT", "INPUT"].includes(document.activeElement.tagName)) return;
     [cache.devices, cache.systems] = await Promise.all([api("/devices"), api("/systems")]);
     const el = document.getElementById("systems");
     if (el) { el.innerHTML = systemsHtml(); bindSystemControls(); }
@@ -185,6 +185,28 @@ function systemSelect(d) {
 }
 
 function bindSystemControls() {
+  $app.querySelectorAll("[data-outlet]").forEach(cb => {
+    cb.onchange = () => guarded(async () => {
+      const on = cb.checked, n = cb.dataset.outlet, d = cache.devices.find(x => x.sn === cb.dataset.sn);
+      if (!on && !confirm(`AC-Ausgang ${n} an „${devName(d)}“ ausschalten? Angeschlossene Geräte verlieren den Strom.`)) {
+        cb.checked = true;
+        return;
+      }
+      cb.disabled = true;
+      try {
+        await api(`/devices/${encodeURIComponent(cb.dataset.sn)}/outlet`, { method: "POST", body: { outlet: Number(n), on } });
+        toast(`AC-Ausgang ${n} ${on ? "eingeschaltet" : "ausgeschaltet"}`);
+        cache.devices = await api("/devices");
+        const el = document.getElementById("systems");
+        if (el) { el.innerHTML = systemsHtml(); bindSystemControls(); }
+      } catch (e) {
+        cb.checked = !on;
+        throw e;
+      } finally {
+        cb.disabled = false;
+      }
+    });
+  });
   $app.querySelectorAll("[data-sysfor]").forEach(sel => {
     const d = cache.devices.find(x => x.sn === sel.dataset.sysfor);
     if (d && !d.system_manual) sel.value = "auto";
@@ -245,6 +267,16 @@ function activityBadge(a) {
   return `<span class="act ${x.cls}" title="Quelle: ${esc(a.source)}">${x.icon} ${x.text}${p}</span>`;
 }
 
+function outletRow(d, n, on, w) {
+  if (on == null && w == null) return "";
+  return `<div class="outlet">
+    <span>AC-Ausgang ${n}</span>
+    <span class="outlet-w">${on === false ? "aus" : fmtNum(w, " W")}</span>
+    <label class="switch" title="AC-Ausgang ${n} ${on ? "ausschalten" : "einschalten"}">
+      <input type="checkbox" data-outlet="${n}" data-sn="${esc(d.sn)}" ${on ? "checked" : ""}><span></span>
+    </label></div>`;
+}
+
 const onOff = v => (v === null || v === undefined ? "–" : v ? "an" : "aus");
 
 function deviceCard(d) {
@@ -261,10 +293,10 @@ function deviceCard(d) {
     <div class="bar"><div style="width:${soc}%"></div></div>${socHint}
     <dl class="kv">
       <dt>AC-Leistung (Gerät)</dt><dd>${fmtNum(d.ac_w, " W")}</dd>
-      <dt>AC-Ausgang 1 / 2</dt><dd>${onOff(d.ac1_on)} / ${onOff(d.ac2_on)}</dd>
       <dt>Live-Daten (MQTT)</dt><dd>${fmtTime(d.mqtt_ts)}</dd>
       <dt>Letzte Abfrage</dt><dd>${fmtTime(d.last_poll)}</dd>
     </dl></a>
+    ${outletRow(d, 1, d.ac1_on, d.ac1_w)}${outletRow(d, 2, d.ac2_on, d.ac2_w)}
     <div class="card-foot"><span class="muted">System</span>${systemSelect(d)}</div></div>`;
 }
 

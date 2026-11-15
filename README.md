@@ -10,6 +10,7 @@ Ziel: **jedem Speicher eigene Regeln geben**, z. B. eigene Entladegrenzen pro Ge
 
 - **Geräteverwaltung:** Alle Geräte des EcoFlow-Kontos abrufen, Anzeigenamen vergeben, Abfrage pro Gerät an- und ausschalten, Haupt- und Nebengerät erkennen
 - **Systemansicht:** Die Übersicht ist nach EcoFlow-Systemen gruppiert. Jedes System hat Systemwerte (Gesamtladestand, Solar, Netz, Hausverbrauch, Batterieleistung, Betriebsmodus, Grenzen, Backup-Reserve) und darunter seine Geräte, Hauptgerät zuerst. Die Zuordnung erfolgt automatisch über die von EcoFlow gemeldete `systemGroupId` (MQTT) oder von Hand; Systeme lassen sich umbenennen.
+- **AC-Ausgänge:** Leistung beider Steckdosen pro Gerät (`offgrid1/2ActivePower`) und **Ein-/Aus-Schalter** direkt auf der Gerätekarte (`cfgRelay2Onoff` = Ausgang 1, `cfgRelay3Onoff` = Ausgang 2; Ausschalten mit Sicherheitsabfrage)
 - **Pro Speicher:** Ladestand, **aktueller Zustand (lädt / entlädt / Standby mit Leistung)**, AC-Leistung und AC-Ausgänge
 - **Live-Daten über MQTT:** Die HTTP-Schnittstelle von EcoFlow liefert bei STREAM nur wenige Systemwerte. Der Ladestand der einzelnen Speicher und die Rolle (Haupt/Neben) kommen über den MQTT-Broker der Open-API. ecoflower-home verbindet sich automatisch damit.
 - **Verlauf:** Ladestand und gemeldete Entladegrenze der letzten 24 Stunden als Diagramm (in SQLite gespeichert, Aufbewahrung einstellbar)

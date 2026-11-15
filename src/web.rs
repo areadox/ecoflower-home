@@ -46,6 +46,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/devices/{sn}/refresh", post(refresh_device))
         .route("/devices/{sn}/history", get(device_history))
         .route("/devices/{sn}/send", post(send_command))
+        .route("/devices/{sn}/outlet", post(switch_outlet))
         .route("/commands", get(list_commands).post(save_command))
         .route("/commands/{id}", delete(delete_command))
         .route("/rules", get(list_rules).post(save_rule))
@@ -365,6 +366,48 @@ async fn delete_system(State(s): State<Arc<AppState>>, Path(id): Path<i64>) -> A
     conn.execute("UPDATE devices SET system_id=NULL, system_manual=0 WHERE system_id=?1", [id])?;
     conn.execute("DELETE FROM systems WHERE id=?1", [id])?;
     Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct OutletInput {
+    /// 1 oder 2
+    outlet: u8,
+    on: bool,
+}
+
+/// AC-Ausgang 1 (`relay2Onoff`) oder 2 (`relay3Onoff`) schalten – sofort, auch im Testmodus.
+async fn switch_outlet(
+    State(s): State<Arc<AppState>>,
+    Path(sn): Path<String>,
+    Json(i): Json<OutletInput>,
+) -> AppResult<Json<Value>> {
+    let (cfg_key, quota_key) = match i.outlet {
+        1 => ("cfgRelay2Onoff", "relay2Onoff"),
+        2 => ("cfgRelay3Onoff", "relay3Onoff"),
+        _ => return Err(AppError(StatusCode::BAD_REQUEST, "Ausgang muss 1 oder 2 sein".into())),
+    };
+    let client = engine::client(&s)?;
+    let payload = json!({
+        "sn": sn, "cmdId": 17, "cmdFunc": 254, "dirDest": 1, "dirSrc": 1, "dest": 2, "needAck": true,
+        "params": { cfg_key: i.on }
+    });
+    let result = client.set_quota(payload).await;
+    let conn = s.db.lock().unwrap();
+    let label = format!("AC-Ausgang {} {}", i.outlet, if i.on { "eingeschaltet" } else { "ausgeschaltet" });
+    match result {
+        Ok(_) => {
+            // Sofort anzeigen; die nächsten Live-Daten bestätigen den Zustand
+            let mut m = serde_json::Map::new();
+            m.insert(quota_key.into(), json!(i.on));
+            db::merge_quotas(&conn, &sn, &m)?;
+            db::log_event(&conn, &sn, "info", &label);
+            Ok(Json(json!({ "ok": true })))
+        }
+        Err(e) => {
+            db::log_event(&conn, &sn, "error", &format!("{label} – fehlgeschlagen: {e}"));
+            Err(AppError(StatusCode::BAD_GATEWAY, e.to_string()))
+        }
+    }
 }
 
 // ---------- Befehle ----------

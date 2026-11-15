@@ -281,6 +281,9 @@ pub struct Device {
     pub ac_w: Option<f64>,
     pub ac1_on: Option<bool>,
     pub ac2_on: Option<bool>,
+    /// Leistung an den AC-Ausgängen in W
+    pub ac1_w: Option<f64>,
+    pub ac2_w: Option<f64>,
     pub sys_soc: Option<f64>,
     pub pv_w: Option<f64>,
     pub grid_w: Option<f64>,
@@ -325,6 +328,8 @@ pub fn list_devices(conn: &Connection) -> Result<Vec<Device>> {
                 ac_w: num("gridConnectionPower"),
                 ac1_on: num("relay2Onoff").map(|v| v != 0.0),
                 ac2_on: num("relay3Onoff").map(|v| v != 0.0),
+                ac1_w: num("offgrid1ActivePower"),
+                ac2_w: num("offgrid2ActivePower"),
                 sys_soc: num("cmsBattSoc"),
                 pv_w: num("powGetPvSum"),
                 grid_w: num("powGetSysGrid"),
