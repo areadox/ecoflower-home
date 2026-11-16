@@ -57,6 +57,7 @@ async function loadBase() {
 const routes = {
   "": renderOverview,
   device: renderDevice,
+  charts: renderCharts,
   regulator: renderRegulator,
   rules: renderRules,
   commands: renderCommands,
@@ -70,6 +71,9 @@ async function route() {
     const tab = a.dataset.tab;
     a.classList.toggle("active", (tab === "overview" && (name === "" || name === "device")) || tab === name);
   });
+  const menu = document.getElementById("menu");
+  menu.open = false;
+  menu.classList.toggle("active", !!menu.querySelector("a.active"));
   clearInterval(route._timer);
   clearInterval(route._meterTimer);
   await guarded(async () => {
@@ -78,6 +82,11 @@ async function route() {
   });
 }
 window.addEventListener("hashchange", route);
+// Menü schließen, wenn daneben geklickt wird
+document.addEventListener("click", e => {
+  const menu = document.getElementById("menu");
+  if (menu.open && !menu.contains(e.target)) menu.open = false;
+});
 
 // ---------- Übersicht ----------
 
@@ -419,6 +428,163 @@ function eventsTable(events) {
   const name = sn => { const d = cache.devices.find(x => x.sn === sn); return d ? devName(d) : sn; };
   return `<table><tr><th>Zeit</th><th>Gerät</th><th>Meldung</th></tr>` +
     events.map(e => `<tr class="level-${esc(e.level)}"><td style="white-space:nowrap">${fmtTime(e.ts)}</td><td>${esc(name(e.sn))}</td><td>${esc(e.message)}</td></tr>`).join("") + `</table>`;
+}
+
+// ---------- Grafiken ----------
+
+// Kategoriale Farben (dunkler Hintergrund, geprüft: CVD-Abstand, Kontrast ≥ 3:1).
+// Die Farbe hängt am Gerät (feste Reihenfolge nach Seriennummer), nicht an der Auswahl.
+const SERIES = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#0ca30c", "#9085e9", "#e66767"];
+const chartState = { hours: 24, hidden: new Set() };
+
+function deviceColor(sn) {
+  const order = [...cache.devices].map(d => d.sn).sort();
+  const i = order.indexOf(sn);
+  return SERIES[i % SERIES.length];
+}
+
+async function renderCharts() {
+  const data = await api(`/charts?hours=${chartState.hours}`);
+  const ranges = [[6, "6 Std."], [24, "24 Std."], [72, "3 Tage"], [168, "7 Tage"], [720, "30 Tage"]];
+  const devs = data.devices.filter(d => d.points.length);
+  const fmtKwh = v => `${(Math.round(v * 100) / 100).toLocaleString("de-DE", { minimumFractionDigits: 2 })} kWh`;
+  const hasMeter = data.meter.length > 0;
+
+  $app.innerHTML = `
+    <div class="toolbar"><h1>Grafiken</h1><span class="spacer"></span>
+      <div class="seg">${ranges.map(([h, l]) => `<button data-hours="${h}" class="${h === chartState.hours ? "on" : ""}">${l}</button>`).join("")}</div>
+    </div>
+    ${devs.length ? `<div class="chips">${devs.map(d => `<button class="chip ${chartState.hidden.has(d.sn) ? "off" : ""}" data-chip="${esc(d.sn)}">
+        <i style="background:${deviceColor(d.sn)}"></i>${esc(d.name)}</button>`).join("")}</div>` : ""}
+
+    <div class="card">
+      <h3>Energie im Zeitraum</h3>
+      <table class="energy">
+        <tr><th>Speicher</th><th>geladen</th><th>entladen</th></tr>
+        ${data.devices.map(d => `<tr><td><i class="dot" style="background:${deviceColor(d.sn)}"></i>${esc(d.name)}</td>
+          <td>${d.has_power ? fmtKwh(d.charged_kwh) : "–"}</td><td>${d.has_power ? fmtKwh(d.discharged_kwh) : "–"}</td></tr>`).join("")}
+        ${hasMeter ? `<tr class="sum"><td>Stromzähler</td><td>Bezug ${fmtKwh(data.meter_import_kwh)}</td><td>Einspeisung ${fmtKwh(data.meter_export_kwh)}</td></tr>` : ""}
+      </table>
+      <div class="muted" style="margin-top:8px">Berechnet aus den Aufzeichnungen (Akkuleistung pro Speicher ab Version 0.0.11). Lücken über 10 Minuten werden nicht mitgezählt.</div>
+    </div>
+
+    <div class="card chart-card"><h3>Ladestand <span class="muted">in %</span></h3><div id="ch-soc" class="chart-box"></div></div>
+    <div class="card chart-card"><h3>Akkuleistung je Speicher <span class="muted">in W · über 0 = lädt, unter 0 = entlädt</span></h3><div id="ch-pow" class="chart-box"></div></div>
+    ${hasMeter ? `<div class="card chart-card"><h3>Stromzähler <span class="muted">in W · über 0 = Bezug, unter 0 = Einspeisung</span></h3><div id="ch-meter" class="chart-box"></div></div>` : ""}
+  `;
+
+  const visible = devs.filter(d => !chartState.hidden.has(d.sn));
+  const draw = () => {
+    lineChart(document.getElementById("ch-soc"), {
+      from: data.from, to: data.to, bucket: data.bucket, unit: " %", yMin: 0, yMax: 100,
+      series: visible.map(d => ({ name: d.name, color: deviceColor(d.sn), points: d.points.map(p => [p[0], p[1]]) })),
+    });
+    lineChart(document.getElementById("ch-pow"), {
+      from: data.from, to: data.to, bucket: data.bucket, unit: " W", zero: true,
+      series: visible.map(d => ({ name: d.name, color: deviceColor(d.sn), points: d.points.map(p => [p[0], p[2]]) })),
+      empty: "Noch keine Aufzeichnung der Akkuleistung – sie wird ab Version 0.0.11 mitgeschrieben.",
+    });
+    if (hasMeter) lineChart(document.getElementById("ch-meter"), {
+      from: data.from, to: data.to, bucket: Math.max(data.bucket, 30), unit: " W", zero: true,
+      series: [{ name: "Zähler", color: SERIES[0], points: data.meter.map(p => [p[0], p[1]]) }],
+    });
+  };
+  draw();
+
+  $app.querySelectorAll("[data-hours]").forEach(b => b.onclick = () => { chartState.hours = Number(b.dataset.hours); route(); });
+  $app.querySelectorAll("[data-chip]").forEach(b => b.onclick = () => {
+    const sn = b.dataset.chip;
+    chartState.hidden.has(sn) ? chartState.hidden.delete(sn) : chartState.hidden.add(sn);
+    route();
+  });
+  clearTimeout(renderCharts._rs);
+  window.onresize = () => { clearTimeout(renderCharts._rs); renderCharts._rs = setTimeout(() => document.getElementById("ch-soc") && draw(), 150); };
+  // Alle 60 s neu laden
+  route._timer = setInterval(() => { if (!document.querySelector(".chart-box:hover")) route(); }, 60000);
+}
+
+/** Liniendiagramm als SVG mit Fadenkreuz und Tooltip. points: [[ts, wert|null], …] */
+function lineChart(el, o) {
+  if (!el) return;
+  const series = o.series.map(s => ({ ...s, points: s.points.filter(p => p[1] != null) })).filter(s => s.points.length);
+  if (!series.length) { el.innerHTML = `<div class="muted chart-empty">${esc(o.empty || "Keine Daten im gewählten Zeitraum.")}</div>`; return; }
+  const W = Math.max(320, el.clientWidth), H = 240, m = { l: 58, r: 14, t: 10, b: 26 };
+  const iw = W - m.l - m.r, ih = H - m.t - m.b;
+  let lo = o.yMin ?? Infinity, hi = o.yMax ?? -Infinity;
+  if (o.yMin == null || o.yMax == null) {
+    for (const s of series) for (const [, v] of s.points) { if (o.yMin == null) lo = Math.min(lo, v); if (o.yMax == null) hi = Math.max(hi, v); }
+    if (o.zero) { lo = Math.min(lo, 0); hi = Math.max(hi, 0); }
+    if (lo === hi) { lo -= 1; hi += 1; }
+  }
+  // „Schöne“ Achsenschritte
+  const span = hi - lo, raw = span / 4, mag = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 2.5, 5, 10].map(f => f * mag).find(s => s >= raw);
+  if (o.yMin == null) lo = Math.floor(lo / step) * step;
+  if (o.yMax == null) hi = Math.ceil(hi / step) * step;
+  const x = t => m.l + ((t - o.from) / (o.to - o.from)) * iw;
+  const y = v => m.t + (1 - (v - lo) / (hi - lo)) * ih;
+  const fmtV = v => `${Math.round(v).toLocaleString("de-DE")}${o.unit}`;
+
+  let grid = "";
+  for (let v = lo; v <= hi + 1e-9; v += step) {
+    const isZero = o.zero && Math.abs(v) < 1e-9;
+    grid += `<line x1="${m.l}" x2="${W - m.r}" y1="${y(v)}" y2="${y(v)}" class="${isZero ? "axis-zero" : "grid"}"/>
+      <text x="${m.l - 8}" y="${y(v) + 4}" text-anchor="end" class="tick">${Math.round(v).toLocaleString("de-DE")}</text>`;
+  }
+  const spanH = (o.to - o.from) / 3600;
+  const tStep = [1, 2, 3, 6, 12, 24, 48, 72, 168].map(h => h * 3600).find(s => (o.to - o.from) / s <= Math.max(3, Math.floor(iw / 110))) || 168 * 3600;
+  const tz = new Date().getTimezoneOffset() * 60;
+  let xt = "";
+  for (let t = Math.ceil((o.from - tz) / tStep) * tStep + tz; t <= o.to; t += tStep) {
+    const d = new Date(t * 1000);
+    const lbl = spanH <= 24 ? d.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })
+      : d.toLocaleDateString("de-DE", { weekday: "short", day: "2-digit", month: "2-digit" }) + (tStep < 86400 ? " " + d.getHours() + " Uhr" : "");
+    xt += `<line x1="${x(t)}" x2="${x(t)}" y1="${m.t}" y2="${m.t + ih}" class="grid"/>
+      <text x="${x(t)}" y="${H - 6}" text-anchor="middle" class="tick">${lbl}</text>`;
+  }
+  // Linien mit Unterbrechung bei Datenlücken
+  const gap = (o.bucket || 60) * 3;
+  const paths = series.map(s => {
+    let d = "", prev = null;
+    for (const [t, v] of s.points) {
+      d += `${prev === null || t - prev > gap ? "M" : "L"}${x(t).toFixed(1)},${y(v).toFixed(1)}`;
+      prev = t;
+    }
+    return `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  }).join("");
+
+  el.innerHTML = `<svg width="${W}" height="${H}" class="chart-svg">${grid}${xt}${paths}
+      <line class="cross" y1="${m.t}" y2="${m.t + ih}" style="display:none"/>
+      <g class="dots"></g>
+      <rect x="${m.l}" y="${m.t}" width="${iw}" height="${ih}" fill="transparent" class="hit"/></svg>
+    <div class="tip" style="display:none"></div>`;
+
+  const svg = el.querySelector("svg"), cross = el.querySelector(".cross"), dots = el.querySelector(".dots"), tip = el.querySelector(".tip");
+  const hit = el.querySelector(".hit");
+  hit.onmousemove = ev => {
+    const r = svg.getBoundingClientRect();
+    const t = o.from + ((ev.clientX - r.left - m.l) / iw) * (o.to - o.from);
+    const rows = [];
+    let dotHtml = "";
+    for (const s of series) {
+      let best = null;
+      for (const p of s.points) if (!best || Math.abs(p[0] - t) < Math.abs(best[0] - t)) best = p;
+      if (best && Math.abs(best[0] - t) <= gap) {
+        rows.push(`<div><i style="background:${s.color}"></i>${esc(s.name)}<b>${fmtV(best[1])}</b></div>`);
+        dotHtml += `<circle cx="${x(best[0])}" cy="${y(best[1])}" r="4.5" fill="${s.color}" stroke="var(--panel)" stroke-width="2"/>`;
+      }
+    }
+    if (!rows.length) { hit.onmouseleave(); return; }
+    const cx = Math.min(Math.max(ev.clientX - r.left, m.l), m.l + iw);
+    cross.setAttribute("x1", cx); cross.setAttribute("x2", cx); cross.style.display = "";
+    dots.innerHTML = dotHtml;
+    tip.innerHTML = `<div class="tip-time">${new Date(t * 1000).toLocaleString("de-DE", { weekday: "short", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</div>${rows.join("")}`;
+    tip.style.display = "";
+    const left = cx + 14 + tip.offsetWidth > W ? cx - 14 - tip.offsetWidth : cx + 14;
+    tip.style.left = `${left}px`;
+    tip.style.top = `${m.t + 4}px`;
+  };
+  hit.onmouseleave = () => { cross.style.display = "none"; dots.innerHTML = ""; tip.style.display = "none"; };
 }
 
 // ---------- Regler ----------

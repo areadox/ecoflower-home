@@ -116,6 +116,13 @@ fn migrate(conn: &Connection) -> Result<()> {
         let mut stmt = conn.prepare("SELECT 1 FROM pragma_table_info('devices') WHERE name = ?1")?;
         Ok(stmt.exists([col])?)
     };
+    {
+        let mut stmt = conn.prepare("SELECT 1 FROM pragma_table_info('samples') WHERE name = 'unit_w'")?;
+        if !stmt.exists([])? {
+            // 0.0.11: Akkuleistung pro Gerät (+ Laden / − Entladen)
+            conn.execute_batch("ALTER TABLE samples ADD COLUMN unit_w REAL;")?;
+        }
+    }
     if !has_col("system_id")? {
         conn.execute_batch(
             "ALTER TABLE devices ADD COLUMN system_id INTEGER;
@@ -450,6 +457,18 @@ pub fn device_soc_key(conn: &Connection, sn: &str) -> Result<String> {
 
 // ---------- Befehle ----------
 
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn energie_integrieren() {
+        // 1 h mit 1000 W laden, dann 30 min mit 500 W entladen, dann eine Lücke
+        let pts = vec![(0, 1000.0), (3600, 1000.0), (3601, -500.0), (5401, -500.0), (99999, 100.0)];
+        let (c, d) = super::integrate_kwh(&pts, 4000);
+        assert!((c - 1.0).abs() < 0.01, "{c}");
+        assert!((d - 0.25).abs() < 0.01, "{d}");
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Command {
     #[serde(default)]
@@ -591,20 +610,54 @@ pub fn update_rule_state(conn: &Connection, id: i64, state: &str, action_ts: i64
 
 // ---------- Verlauf ----------
 
+/// Energie aus einer Leistungs-Zeitreihe: (positiv in kWh, negativ in kWh).
+/// Lücken über `max_gap` Sekunden werden nicht überbrückt.
+pub fn integrate_kwh(points: &[(i64, f64)], max_gap: i64) -> (f64, f64) {
+    let (mut pos, mut neg) = (0.0, 0.0);
+    for w in points.windows(2) {
+        let (t0, p0) = w[0];
+        let (t1, p1) = w[1];
+        let dt = t1 - t0;
+        if dt <= 0 || dt > max_gap {
+            continue;
+        }
+        let avg = (p0 + p1) / 2.0;
+        let wh = avg * dt as f64 / 3600.0;
+        if wh >= 0.0 { pos += wh } else { neg -= wh }
+    }
+    (pos / 1000.0, neg / 1000.0)
+}
+
+/// Zeitreihe in Zeitfenster („Buckets“) mitteln, damit lange Zeiträume schnell bleiben.
+pub fn bucketed(conn: &Connection, sql: &str, sn: Option<&str>, since: i64, bucket: i64) -> Result<Vec<Vec<Option<f64>>>> {
+    let mut stmt = conn.prepare(sql)?;
+    let rows = match sn {
+        Some(sn) => stmt.query_map(params![bucket, since, sn], row_vec)?.collect::<Result<Vec<_>, _>>()?,
+        None => stmt.query_map(params![bucket, since], row_vec)?.collect::<Result<Vec<_>, _>>()?,
+    };
+    Ok(rows)
+}
+
+fn row_vec(r: &rusqlite::Row) -> rusqlite::Result<Vec<Option<f64>>> {
+    let n = r.as_ref().column_count();
+    (0..n).map(|i| r.get::<_, Option<f64>>(i)).collect()
+}
+
 #[derive(Serialize)]
 pub struct Sample {
     pub ts: i64,
     pub soc: Option<f64>,
     pub battery_w: Option<f64>,
     pub min_dsg: Option<f64>,
+    pub unit_w: Option<f64>,
 }
 
 pub fn history(conn: &Connection, sn: &str, since: i64) -> Result<Vec<Sample>> {
     let mut stmt =
-        conn.prepare("SELECT ts, soc, battery_w, min_dsg FROM samples WHERE sn = ?1 AND ts >= ?2 ORDER BY ts")?;
+        conn.prepare("SELECT ts, soc, battery_w, min_dsg, unit_w FROM samples WHERE sn = ?1 AND ts >= ?2 ORDER BY ts")?;
     let rows = stmt
         .query_map(params![sn, since], |r| {
-            Ok(Sample { ts: r.get(0)?, soc: r.get(1)?, battery_w: r.get(2)?, min_dsg: r.get(3)? })
+            Ok(Sample { ts: r.get(0)?, soc: r.get(1)?, battery_w: r.get(2)?, min_dsg: r.get(3)?, unit_w: r.get(4)? })
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)

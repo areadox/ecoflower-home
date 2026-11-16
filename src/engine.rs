@@ -202,8 +202,17 @@ pub async fn poll_device(state: &Arc<AppState>, client: &EcoFlowClient, sn: &str
                     rusqlite::params![sn, now],
                 )?;
                 let num = |k: &str| quotas.get(k).and_then(as_f64);
+                let role: String = conn
+                    .query_row("SELECT role FROM devices WHERE sn = ?1", [sn], |r| r.get(0))
+                    .unwrap_or_default();
+                // Akkuleistung dieses Geräts mit Vorzeichen (+ Laden / − Entladen)
+                let unit_w = pick_activity(&quotas, &role).map(|a| match a.state {
+                    "charging" => a.power_w.unwrap_or(0.0),
+                    "discharging" => -a.power_w.unwrap_or(0.0),
+                    _ => 0.0,
+                });
                 conn.execute(
-                    "INSERT INTO samples (sn, ts, soc, battery_w, min_dsg, max_chg, backup) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                    "INSERT INTO samples (sn, ts, soc, battery_w, min_dsg, max_chg, backup, unit_w) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
                     rusqlite::params![
                         sn,
                         now,
@@ -211,7 +220,8 @@ pub async fn poll_device(state: &Arc<AppState>, client: &EcoFlowClient, sn: &str
                         num("powGetBpCms"),
                         num("cmsMinDsgSoc"),
                         num("cmsMaxChgSoc"),
-                        num("backupReverseSoc")
+                        num("backupReverseSoc"),
+                        unit_w
                     ],
                 )?;
                 quotas

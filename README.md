@@ -13,7 +13,9 @@ Ziel: **jedem Speicher eigene Regeln geben**, z. B. eigene Entladegrenzen pro Ge
 - **AC-Ausgänge:** Leistung beider Steckdosen pro Gerät (`offgrid1/2ActivePower`) und **Ein-/Aus-Schalter** direkt auf der Gerätekarte (`cfgRelay2Onoff` = Ausgang 1, `cfgRelay3Onoff` = Ausgang 2; Ausschalten mit Sicherheitsabfrage)
 - **Pro Speicher:** Ladestand, **aktueller Zustand (lädt / entlädt / Standby mit Leistung)**, AC-Leistung und AC-Ausgänge
 - **Live-Daten über MQTT:** Die HTTP-Schnittstelle von EcoFlow liefert bei STREAM nur wenige Systemwerte. Der Ladestand der einzelnen Speicher und die Rolle (Haupt/Neben) kommen über den MQTT-Broker der Open-API. ecoflower-home verbindet sich automatisch damit.
-- **Verlauf:** Ladestand und gemeldete Entladegrenze der letzten 24 Stunden als Diagramm (in SQLite gespeichert, Aufbewahrung einstellbar)
+- **Grafiken** (eigene Seite): Ladestand und Akkuleistung (lädt/entlädt) aller Speicher sowie der Stromzähler über 6 Stunden bis 30 Tage, mit Tooltip beim Überfahren, Speicher ein-/ausblendbar, dazu eine **Energiebilanz** (geladen/entladen je Speicher, Bezug/Einspeisung am Zähler in kWh). Die Akkuleistung pro Speicher wird ab Version 0.0.11 aufgezeichnet.
+- **Verlauf pro Gerät:** Ladestand und gemeldete Entladegrenze der letzten 24 Stunden auf der Geräteseite (in SQLite gespeichert, Aufbewahrung einstellbar)
+- **Navigation:** Übersicht und Grafiken direkt, alles Weitere (Regler, Regeln, Befehle, Ereignisse, Einstellungen) im Menü
 - **Alle Messwerte (Quotas)** eines Geräts durchsuchbar, z. B. um herauszufinden, welche Werte ein Gerät liefert
 - **Befehle senden:** über Vorlagen (Entladegrenze, Ladegrenze, Backup-Reserve, AC-Ausgänge) oder als Roh-JSON
 - **Regeln pro Gerät:**

@@ -57,6 +57,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/meter", get(meter_status))
         .route("/meter/test", post(meter_test))
         .route("/meter/history", get(meter_history))
+        .route("/charts", get(charts))
         .route("/update", get(update_info))
         .route("/update/check", post(update_check))
         .route("/update/install", post(update_install));
@@ -655,4 +656,59 @@ async fn regulator_save(
     }
     s.regulator_restart.notify_one();
     Ok(Json(json!({ "ok": true })))
+}
+
+// ---------- Grafiken ----------
+
+/// Alle Zeitreihen für die Grafik-Seite in einem Aufruf, auf ca. 400 Punkte gemittelt,
+/// dazu die geladene/entladene Energie je Speicher und Bezug/Einspeisung am Zähler.
+async fn charts(State(s): State<Arc<AppState>>, Query(q): Query<HistoryQuery>) -> AppResult<Json<Value>> {
+    let hours = q.hours.unwrap_or(24).clamp(1, 24 * 90);
+    let now = chrono::Utc::now().timestamp();
+    let since = now - hours * 3600;
+    let bucket = (hours * 3600 / 400).max(60);
+    let conn = s.db.lock().unwrap();
+    let devices = db::list_devices(&conn)?;
+    let mut out_devices = Vec::new();
+    for d in &devices {
+        let points = db::bucketed(
+            &conn,
+            "SELECT (ts / ?1) * ?1 AS t, AVG(soc), AVG(unit_w) FROM samples WHERE ts >= ?2 AND sn = ?3 GROUP BY t ORDER BY t",
+            Some(&d.sn),
+            since,
+            bucket,
+        )?;
+        // Energie aus den Rohwerten (nicht aus den gemittelten)
+        let mut stmt = conn.prepare("SELECT ts, unit_w FROM samples WHERE sn = ?1 AND ts >= ?2 AND unit_w IS NOT NULL ORDER BY ts")?;
+        let raw: Vec<(i64, f64)> = stmt.query_map(rusqlite::params![d.sn, since], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
+        let (charged, discharged) = db::integrate_kwh(&raw, 600);
+        out_devices.push(json!({
+            "sn": d.sn,
+            "name": if d.alias.is_empty() { &d.name } else { &d.alias },
+            "system_id": d.system_id,
+            "points": points,
+            "charged_kwh": charged,
+            "discharged_kwh": discharged,
+            "has_power": !raw.is_empty(),
+        }));
+    }
+    let meter = db::bucketed(
+        &conn,
+        "SELECT (ts / ?1) * ?1 AS t, AVG(power_w) FROM meter_samples WHERE ts >= ?2 GROUP BY t ORDER BY t",
+        None,
+        since,
+        bucket,
+    )?;
+    let mut stmt = conn.prepare("SELECT ts, power_w FROM meter_samples WHERE ts >= ?1 AND power_w IS NOT NULL ORDER BY ts")?;
+    let raw: Vec<(i64, f64)> = stmt.query_map([since], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
+    let (import, export) = db::integrate_kwh(&raw, 600);
+    Ok(Json(json!({
+        "from": since,
+        "to": now,
+        "bucket": bucket,
+        "devices": out_devices,
+        "meter": meter,
+        "meter_import_kwh": import,
+        "meter_export_kwh": export,
+    })))
 }

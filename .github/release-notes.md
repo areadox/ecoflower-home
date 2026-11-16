@@ -1,11 +1,15 @@
-### Neu in 0.0.10
-- **AC-Ausgänge auf den Gerätekarten:** aktuelle Leistung beider Steckdosen und ein **Ein-/Aus-Schalter** je Ausgang
-  - Ausschalten fragt vorher nach, damit nichts versehentlich stromlos wird
-  - Schalten wirkt sofort (auch im Testmodus) und steht im Ereignisprotokoll
-- Die Übersicht wird nicht mehr neu gezeichnet, während ein Schalter bedient wird
+### Neu in 0.0.11
+- **Neue Seite „Grafiken“** mit den Aufzeichnungen:
+  - **Ladestand** aller Speicher
+  - **Akkuleistung je Speicher** – über 0 = lädt, unter 0 = entlädt
+  - **Stromzähler** – Bezug und Einspeisung
+  - Zeitraum wählbar: 6 Stunden, 24 Stunden, 3, 7 oder 30 Tage; einzelne Speicher ein-/ausblendbar; Werte aller Speicher beim Überfahren mit der Maus
+  - **Energie im Zeitraum:** geladene und entladene kWh je Speicher, Bezug und Einspeisung am Zähler
+- **Aufzeichnung der Akkuleistung pro Speicher** (bisher nur der Systemwert) – die Grafik dazu füllt sich ab dem Update
+- **Neue Navigation:** Übersicht und Grafiken direkt erreichbar, alles andere im Ordner **Menü**
 
 ### Update
-In der Weboberfläche unter *Einstellungen → Update*.
+In der Weboberfläche unter *Menü → Einstellungen → Update*.
 
 ### Download
 - `ecoflower-home-linux-x86_64`: Linux x86_64 (PC/Server), glibc ≥ 2.28

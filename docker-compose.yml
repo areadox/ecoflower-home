@@ -1,7 +1,7 @@
 services:
   ecoflower-home:
     build: .
-    image: localhost/ecoflower-home:0.0.10
+    image: localhost/ecoflower-home:0.0.11
     container_name: ecoflower-home
     restart: unless-stopped
     ports:
